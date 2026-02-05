@@ -142,6 +142,30 @@ mfxStatus CEncTaskPool::Init(MFXVideoSession* pmfxSession,
     return MFX_ERR_NONE;
 }
 
+/* SynchronizeFirstTask: Wait for encoding completion and write to file
+ *
+ * PURPOSE:
+ * Waits for the oldest in-flight encoding task to complete, then writes
+ * the compressed bitstream to the output file.
+ *
+ * OPERATION:
+ * 1. SyncOperation() - Wait for GPU encoder to finish (BLOCKS if not done)
+ * 2. WriteBitstream() - Write compressed data to file
+ * 3. Reset() - Clear task for reuse
+ * 4. Move to next task in circular buffer
+ *
+ * PERFORMANCE IMPLICATIONS:
+ * - Called only when task pool is full (all AsyncDepth tasks busy)
+ * - Blocks main thread until encoding completes
+ * - With high AsyncDepth (e.g., 4-8), rarely blocks (tasks complete before needed)
+ * - With buffer starvation, frequently blocks (tasks stuck in retry loops)
+ *
+ * FILE WRITE FLOW:
+ * Task bitstream buffer -> WriteBitstream() -> File I/O -> Disk
+ * - Buffer must be large enough to hold entire compressed frame
+ * - If buffer too small, frame never reaches this function
+ * - Instead, stuck retrying EncodeFrameAsync() with reallocations
+ */
 mfxStatus CEncTaskPool::SynchronizeFirstTask(mfxU32 syncOpTimeout) {
     m_statOverall.StartTimeMeasurement();
     MSDK_CHECK_POINTER(m_pTasks, MFX_ERR_NOT_INITIALIZED);
@@ -2249,6 +2273,37 @@ mfxStatus CEncodingPipeline::AllocateSufficientBuffer(mfxBitstreamWrapper& bs) {
     return MFX_ERR_NONE;
 }
 
+/* GetFreeTask: Critical function for pipeline parallelism
+ *
+ * PURPOSE:
+ * Returns an available task from the task pool for encoding the next frame.
+ * If all tasks are busy (in-flight encodes), waits for the oldest to complete.
+ *
+ * TASK POOL ARCHITECTURE:
+ * - Circular buffer of tasks (size = AsyncDepth, typically 4)
+ * - Each task has: bitstream buffer (output), sync point (status), encode control
+ * - Tasks cycle: Free -> Encoding -> Synchronizing -> Writing -> Free
+ *
+ * WHEN THIS BLOCKS PERFORMANCE:
+ * 1. All AsyncDepth tasks are in-flight (being encoded by hardware)
+ * 2. Must call SynchronizeFirstTask() - BLOCKS until oldest encode completes
+ * 3. SynchronizeFirstTask() writes bitstream to file and frees the task
+ * 4. Now can submit next frame for encoding
+ *
+ * BUFFER STARVATION SCENARIO:
+ * If bitstream buffer too small:
+ * - EncodeFrameAsync() fails with MFX_ERR_NOT_ENOUGH_BUFFER
+ * - Must reallocate buffer and retry
+ * - During reallocation, cannot submit new frames
+ * - Other tasks may complete but cannot be reused (buffer issue blocks)
+ * - Effective AsyncDepth drops to 1 (no parallelism)
+ * - FPS plummets because hardware encoder stays idle waiting for CPU
+ *
+ * With correct buffer size:
+ * - All AsyncDepth tasks keep hardware pipeline full
+ * - While hardware encodes frames 0-3, CPU loads frames 4-7
+ * - Maximum throughput achieved
+ */
 mfxStatus CEncodingPipeline::GetFreeTask(sTask** ppTask) {
     mfxStatus sts = MFX_ERR_NONE;
 
@@ -2302,6 +2357,65 @@ mfxStatus CEncodingPipeline::ConfigTCBRCTest(mfxFrameSurface1* pSurf) {
     return sts;
 }
 
+/* ENCODING PIPELINE FLOW OVERVIEW:
+ *
+ * This is the main encoding loop that orchestrates frame encoding and writing to file.
+ * Understanding this flow is crucial to understanding why buffer size impacts performance.
+ *
+ * ARCHITECTURE:
+ * 1. Task Pool: A circular buffer of encoding tasks (size = AsyncDepth)
+ *    - Each task contains: input surface, output bitstream buffer, and sync point
+ *    - Tasks enable parallel/pipelined encoding operations
+ *
+ * 2. Surface Pool: Pre-allocated frame buffers for raw video data
+ *    - Encoder input surfaces (and VPP input/output if preprocessing enabled)
+ *
+ * 3. Bitstream Buffers: Output buffers for compressed data (one per task)
+ *    - Size determined by GetSufficientBufferSize()
+ *    - Must be large enough to hold compressed frame data
+ *
+ * ENCODING FLOW (per frame):
+ * 1. GetFreeTask() - Get available task from pool
+ *    - If no free tasks, calls SynchronizeFirstTask() to wait for oldest task to complete
+ *    - This is where pipeline stalls if tasks are still in-flight
+ *
+ * 2. LoadNextFrame() - Read raw frame from input file into surface
+ *
+ * 3. EncodeFrameAsync() - Submit frame for hardware encoding
+ *    - Returns immediately with sync point (async operation)
+ *    - Encoder compresses frame and writes to task's bitstream buffer
+ *    - Returns MFX_ERR_NOT_ENOUGH_BUFFER if buffer too small
+ *
+ * 4. Continue loop - Submit next frame while previous encodes in parallel
+ *
+ * 5. SynchronizeFirstTask() - Wait for oldest encoding to complete
+ *    - Only called when task pool is full (AsyncDepth limit reached)
+ *    - Writes completed bitstream to file
+ *    - Frees task for reuse
+ *
+ * BUFFER STARVATION IMPACT ON FPS:
+ *
+ * If bitstream buffer is too small:
+ * 1. EncodeFrameAsync() returns MFX_ERR_NOT_ENOUGH_BUFFER
+ * 2. Pipeline calls AllocateSufficientBuffer() to reallocate
+ * 3. Must retry EncodeFrameAsync() with larger buffer
+ * 4. This retry loop breaks pipeline parallelism
+ * 5. Hardware encoder may stall waiting for buffer resize
+ * 6. Subsequent frames cannot be submitted until current frame succeeds
+ * 7. Async depth effectively reduced to 1, destroying parallelism
+ * 8. Result: FPS drops dramatically (e.g., 173 fps -> 43 fps for 4K 10-bit)
+ *
+ * WHY BUFFER SIZE MATTERS FOR 10-BIT:
+ * - 10-bit pixels = 2 bytes each (vs 1 byte for 8-bit)
+ * - Compressed 10-bit bitstream is proportionally larger
+ * - Without accounting for bit depth, buffer is undersized
+ * - Continuous buffer reallocation on every frame
+ * - Pipeline never achieves full parallelism
+ *
+ * SOLUTION:
+ * GetSufficientBufferSize() now increases buffer by 25% for 10-bit, 50% for 12-bit
+ * This prevents MFX_ERR_NOT_ENOUGH_BUFFER, maintaining full pipeline throughput.
+ */
 mfxStatus CEncodingPipeline::Run() {
     m_statOverall.StartTimeMeasurement();
     MSDK_CHECK_POINTER(m_pmfxENC, MFX_ERR_NOT_INITIALIZED);
