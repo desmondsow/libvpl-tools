@@ -1024,6 +1024,7 @@ CSmplYUVWriter::CSmplYUVWriter()
           m_fDestMVC(NULL),
           m_bInited(false),
           m_bIsMultiView(false),
+          m_bIsNullOutput(false),
           m_numCreatedFiles(0),
           m_sFile(),
           m_nViews(0){};
@@ -1034,6 +1035,13 @@ mfxStatus CSmplYUVWriter::Init(const char* strFileName, const mfxU32 numViews) {
 
     m_sFile  = std::string(strFileName);
     m_nViews = numViews;
+
+    // Detect null output devices for optimization
+    m_bIsNullOutput = (strcmp(strFileName, "/dev/null") == 0 ||
+#ifdef _WIN32
+                       _stricmp(strFileName, "NUL") == 0 ||
+#endif
+                       false);
 
     Close();
 
@@ -1093,6 +1101,7 @@ void CSmplYUVWriter::Close() {
 
     m_numCreatedFiles = 0;
     m_bInited         = false;
+    m_bIsNullOutput   = false;
 }
 
 mfxStatus GetChromaSize(const mfxFrameInfo& pInfo, mfxU32& ChromaW, mfxU32& ChromaH) {
@@ -1163,6 +1172,11 @@ mfxStatus CSmplYUVWriter::WriteNextFrame(mfxFrameSurface1* pSurface) {
     MSDK_CHECK_ERROR(m_bInited, false, MFX_ERR_NOT_INITIALIZED);
     MSDK_CHECK_POINTER(pSurface, MFX_ERR_NULL_PTR);
 
+    // Fast path: skip all processing if writing to null device
+    if (m_bIsNullOutput) {
+        return MFX_ERR_NONE;
+    }
+
     mfxFrameInfo& pInfo = pSurface->Info;
     mfxFrameData& pData = pSurface->Data;
 
@@ -1194,14 +1208,25 @@ mfxStatus CSmplYUVWriter::WriteNextFrame(mfxFrameSurface1* pSurface) {
         case MFX_FOURCC_I420:
         case MFX_FOURCC_I422:
         case MFX_FOURCC_NV16:
-            for (i = 0; i < pInfo.CropH; i++) {
+            // Optimize: write entire plane if no padding, otherwise write line-by-line
+            if (pData.Pitch == pInfo.CropW && pInfo.CropX == 0 && pInfo.CropY == 0) {
+                // Fast path: write entire luma plane in one call
                 MSDK_CHECK_NOT_EQUAL(
-                    fwrite(pData.Y + (pInfo.CropY * pData.Pitch + pInfo.CropX) + i * pData.Pitch,
-                           1,
-                           pInfo.CropW,
-                           dstFile),
-                    pInfo.CropW,
+                    fwrite(pData.Y, 1, (size_t)pInfo.CropW * pInfo.CropH, dstFile),
+                    (size_t)pInfo.CropW * pInfo.CropH,
                     MFX_ERR_UNDEFINED_BEHAVIOR);
+            }
+            else {
+                // Slow path: write line-by-line when there's padding or cropping
+                for (i = 0; i < pInfo.CropH; i++) {
+                    MSDK_CHECK_NOT_EQUAL(
+                        fwrite(pData.Y + (pInfo.CropY * pData.Pitch + pInfo.CropX) + i * pData.Pitch,
+                               1,
+                               pInfo.CropW,
+                               dstFile),
+                        pInfo.CropW,
+                        MFX_ERR_UNDEFINED_BEHAVIOR);
+                }
             }
             break;
         case MFX_FOURCC_Y210:
@@ -1291,74 +1316,124 @@ mfxStatus CSmplYUVWriter::WriteNextFrame(mfxFrameSurface1* pSurface) {
     }
     switch (pInfo.FourCC) {
         case MFX_FOURCC_YV12: {
-            for (i = 0; i < ChromaH; i++) {
+            // Optimize chroma plane writes
+            if (pData.Pitch / 2 == ChromaW && pInfo.CropX == 0 && pInfo.CropY == 0) {
+                // Fast path: write entire V plane
                 MSDK_CHECK_NOT_EQUAL(
-                    fwrite(pData.V + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX / 2) +
-                               i * pData.Pitch,
-                           1,
-                           ChromaW,
-                           dstFile),
-                    ChromaW,
+                    fwrite(pData.V, 1, (size_t)ChromaW * ChromaH, dstFile),
+                    (size_t)ChromaW * ChromaH,
+                    MFX_ERR_UNDEFINED_BEHAVIOR);
+                // Fast path: write entire U plane
+                MSDK_CHECK_NOT_EQUAL(
+                    fwrite(pData.U, 1, (size_t)ChromaW * ChromaH, dstFile),
+                    (size_t)ChromaW * ChromaH,
                     MFX_ERR_UNDEFINED_BEHAVIOR);
             }
-            for (i = 0; i < ChromaH; i++) {
-                MSDK_CHECK_NOT_EQUAL(
-                    fwrite(pData.U + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX / 2) +
-                               i * pData.Pitch / 2,
-                           1,
-                           ChromaW,
-                           dstFile),
-                    ChromaW,
-                    MFX_ERR_UNDEFINED_BEHAVIOR);
+            else {
+                for (i = 0; i < ChromaH; i++) {
+                    MSDK_CHECK_NOT_EQUAL(
+                        fwrite(pData.V + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX / 2) +
+                                   i * pData.Pitch,
+                               1,
+                               ChromaW,
+                               dstFile),
+                        ChromaW,
+                        MFX_ERR_UNDEFINED_BEHAVIOR);
+                }
+                for (i = 0; i < ChromaH; i++) {
+                    MSDK_CHECK_NOT_EQUAL(
+                        fwrite(pData.U + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX / 2) +
+                                   i * pData.Pitch / 2,
+                               1,
+                               ChromaW,
+                               dstFile),
+                        ChromaW,
+                        MFX_ERR_UNDEFINED_BEHAVIOR);
+                }
             }
             break;
         }
         case MFX_FOURCC_I420:
         case MFX_FOURCC_I422: {
-            for (i = 0; i < ChromaH; i++) {
+            // Optimize chroma plane writes
+            if (pData.Pitch / 2 == ChromaW && pInfo.CropX == 0 && pInfo.CropY == 0) {
+                // Fast path: write entire U plane
                 MSDK_CHECK_NOT_EQUAL(
-                    fwrite(pData.U + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX / 2) +
-                               i * pData.Pitch / 2,
-                           1,
-                           ChromaW,
-                           dstFile),
-                    ChromaW,
+                    fwrite(pData.U, 1, (size_t)ChromaW * ChromaH, dstFile),
+                    (size_t)ChromaW * ChromaH,
+                    MFX_ERR_UNDEFINED_BEHAVIOR);
+                // Fast path: write entire V plane
+                MSDK_CHECK_NOT_EQUAL(
+                    fwrite(pData.V, 1, (size_t)ChromaW * ChromaH, dstFile),
+                    (size_t)ChromaW * ChromaH,
                     MFX_ERR_UNDEFINED_BEHAVIOR);
             }
-            for (i = 0; i < ChromaH; i++) {
-                MSDK_CHECK_NOT_EQUAL(
-                    fwrite(pData.V + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX / 2) +
-                               i * pData.Pitch / 2,
-                           1,
-                           ChromaW,
-                           dstFile),
-                    ChromaW,
-                    MFX_ERR_UNDEFINED_BEHAVIOR);
+            else {
+                for (i = 0; i < ChromaH; i++) {
+                    MSDK_CHECK_NOT_EQUAL(
+                        fwrite(pData.U + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX / 2) +
+                                   i * pData.Pitch / 2,
+                               1,
+                               ChromaW,
+                               dstFile),
+                        ChromaW,
+                        MFX_ERR_UNDEFINED_BEHAVIOR);
+                }
+                for (i = 0; i < ChromaH; i++) {
+                    MSDK_CHECK_NOT_EQUAL(
+                        fwrite(pData.V + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX / 2) +
+                                   i * pData.Pitch / 2,
+                               1,
+                               ChromaW,
+                               dstFile),
+                        ChromaW,
+                        MFX_ERR_UNDEFINED_BEHAVIOR);
+                }
             }
             break;
         }
         case MFX_FOURCC_NV12: {
-            for (i = 0; i < ChromaH; i++) {
+            // Optimize NV12 chroma writes
+            if (pData.Pitch == ChromaW && pInfo.CropX == 0 && pInfo.CropY == 0) {
+                // Fast path: write entire UV plane
                 MSDK_CHECK_NOT_EQUAL(
-                    fwrite(pData.UV + (pInfo.CropY * pData.Pitch + pInfo.CropX) + i * pData.Pitch,
-                           1,
-                           ChromaW,
-                           dstFile),
-                    ChromaW,
+                    fwrite(pData.UV, 1, (size_t)ChromaW * ChromaH, dstFile),
+                    (size_t)ChromaW * ChromaH,
                     MFX_ERR_UNDEFINED_BEHAVIOR);
+            }
+            else {
+                for (i = 0; i < ChromaH; i++) {
+                    MSDK_CHECK_NOT_EQUAL(
+                        fwrite(pData.UV + (pInfo.CropY * pData.Pitch + pInfo.CropX) + i * pData.Pitch,
+                               1,
+                               ChromaW,
+                               dstFile),
+                        ChromaW,
+                        MFX_ERR_UNDEFINED_BEHAVIOR);
+                }
             }
             break;
         }
         case MFX_FOURCC_NV16: {
-            for (i = 0; i < ChromaH; i++) {
+            // Optimize NV16 chroma writes
+            if (pData.Pitch == ChromaW && pInfo.CropX == 0 && pInfo.CropY == 0) {
+                // Fast path: write entire UV plane
                 MSDK_CHECK_NOT_EQUAL(
-                    fwrite(
-                        pData.UV + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX) + i * pData.Pitch,
-                        1,
-                        ChromaW,
-                        dstFile),
-                    ChromaW,
+                    fwrite(pData.UV, 1, (size_t)ChromaW * ChromaH, dstFile),
+                    (size_t)ChromaW * ChromaH,
                     MFX_ERR_UNDEFINED_BEHAVIOR);
+            }
+            else {
+                for (i = 0; i < ChromaH; i++) {
+                    MSDK_CHECK_NOT_EQUAL(
+                        fwrite(
+                            pData.UV + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX) + i * pData.Pitch,
+                            1,
+                            ChromaW,
+                            dstFile),
+                        ChromaW,
+                        MFX_ERR_UNDEFINED_BEHAVIOR);
+                }
             }
             break;
         }
@@ -1437,6 +1512,11 @@ mfxStatus CSmplYUVWriter::WriteNextFrame(mfxFrameSurface1* pSurface) {
 mfxStatus CSmplYUVWriter::WriteNextFrameI420(mfxFrameSurface1* pSurface) {
     MSDK_CHECK_ERROR(m_bInited, false, MFX_ERR_NOT_INITIALIZED);
     MSDK_CHECK_POINTER(pSurface, MFX_ERR_NULL_PTR);
+
+    // Fast path: skip all processing if writing to null device
+    if (m_bIsNullOutput) {
+        return MFX_ERR_NONE;
+    }
 
     mfxFrameInfo& pInfo = pSurface->Info;
     mfxFrameData& pData = pSurface->Data;

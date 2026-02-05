@@ -874,12 +874,17 @@ public:
         m_bIsMultiView = true;
     }
 
+    bool IsNullOutput() const {
+        return m_bIsNullOutput;
+    }
+
 protected:
     CSmplYUVWriter(CSmplYUVWriter const&)                  = delete;
     const CSmplYUVWriter& operator=(CSmplYUVWriter const&) = delete;
 
     FILE *m_fDest, **m_fDestMVC;
     bool m_bInited, m_bIsMultiView;
+    bool m_bIsNullOutput;
     mfxU32 m_numCreatedFiles;
     std::string m_sFile;
     mfxU32 m_nViews;
