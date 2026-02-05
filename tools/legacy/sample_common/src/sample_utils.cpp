@@ -1208,25 +1208,14 @@ mfxStatus CSmplYUVWriter::WriteNextFrame(mfxFrameSurface1* pSurface) {
         case MFX_FOURCC_I420:
         case MFX_FOURCC_I422:
         case MFX_FOURCC_NV16:
-            // Optimize: write entire plane if no padding, otherwise write line-by-line
-            if (pData.Pitch == pInfo.CropW && pInfo.CropX == 0 && pInfo.CropY == 0) {
-                // Fast path: write entire luma plane in one call
+            for (i = 0; i < pInfo.CropH; i++) {
                 MSDK_CHECK_NOT_EQUAL(
-                    fwrite(pData.Y, 1, (size_t)pInfo.CropW * pInfo.CropH, dstFile),
-                    (size_t)pInfo.CropW * pInfo.CropH,
+                    fwrite(pData.Y + (pInfo.CropY * pData.Pitch + pInfo.CropX) + i * pData.Pitch,
+                           1,
+                           pInfo.CropW,
+                           dstFile),
+                    pInfo.CropW,
                     MFX_ERR_UNDEFINED_BEHAVIOR);
-            }
-            else {
-                // Slow path: write line-by-line when there's padding or cropping
-                for (i = 0; i < pInfo.CropH; i++) {
-                    MSDK_CHECK_NOT_EQUAL(
-                        fwrite(pData.Y + (pInfo.CropY * pData.Pitch + pInfo.CropX) + i * pData.Pitch,
-                               1,
-                               pInfo.CropW,
-                               dstFile),
-                        pInfo.CropW,
-                        MFX_ERR_UNDEFINED_BEHAVIOR);
-                }
             }
             break;
         case MFX_FOURCC_Y210:
