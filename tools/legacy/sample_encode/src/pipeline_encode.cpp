@@ -2224,6 +2224,13 @@ mfxU32 CEncodingPipeline::GetSufficientBufferSize() {
         mfxU16 bitDepth = std::max(par.mfx.FrameInfo.BitDepthLuma, par.mfx.FrameInfo.BitDepthChroma);
         if (bitDepth > 8) {
             // Increase buffer size by 25% for 10-bit, 50% for 12-bit to ensure sufficient space
+            // Note: Further increasing buffer size beyond these values typically does NOT improve FPS.
+            // Performance is primarily limited by:
+            // 1. AsyncDepth (pipeline parallelism) - more important than buffer size
+            // 2. Hardware encoder throughput
+            // 3. Memory bandwidth
+            // Excessively large buffers only increase memory consumption without performance gain
+            // and may even degrade performance due to cache pressure.
             mfxU32 bitDepthMultiplier = (bitDepth == 10) ? 125 : 150;
             new_size = (new_size * bitDepthMultiplier) / 100;
         }

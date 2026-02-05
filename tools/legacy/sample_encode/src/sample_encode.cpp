@@ -148,6 +148,8 @@ void PrintHelp(char* strAppName, const char* strErrorMessage, ...) {
     printf("   [-path path] - path to plugin (valid only in pair with -p option)\n");
     printf(
         "   [-async]                 - depth of asynchronous pipeline. default value is 4. must be between 1 and 20.\n");
+    printf(
+        "                              Higher values improve performance by allowing parallel encoding operations.\n");
     printf("   [-gpucopy::<on,off>] Enable or disable GPU copy mode\n");
     printf("   [-robust:soft]           - Recovery from GPU hang by inserting an IDR\n");
     printf("   [-vbr]                   - variable bitrate control\n");
