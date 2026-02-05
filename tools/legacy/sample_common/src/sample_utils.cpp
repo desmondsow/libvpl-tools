@@ -1042,6 +1042,8 @@ mfxStatus CSmplYUVWriter::Init(const char* strFileName, const mfxU32 numViews) {
     if (!m_bIsMultiView) {
         MSDK_FOPEN(m_fDest, m_sFile.c_str(), "wb");
         MSDK_CHECK_POINTER(m_fDest, MFX_ERR_NULL_PTR);
+        // Set large buffer to improve write performance for high-resolution video
+        setvbuf(m_fDest, NULL, _IOFBF, 4 * 1024 * 1024); // 4MB buffer
         ++m_numCreatedFiles;
     }
     else {
@@ -1053,6 +1055,8 @@ mfxStatus CSmplYUVWriter::Init(const char* strFileName, const mfxU32 numViews) {
         for (i = 0; i < numViews; ++i) {
             MSDK_FOPEN(m_fDestMVC[i], FormMVCFileName(m_sFile.c_str(), i).c_str(), "wb");
             MSDK_CHECK_POINTER(m_fDestMVC[i], MFX_ERR_NULL_PTR);
+            // Set large buffer to improve write performance for high-resolution video
+            setvbuf(m_fDestMVC[i], NULL, _IOFBF, 4 * 1024 * 1024); // 4MB buffer
             ++m_numCreatedFiles;
         }
     }
