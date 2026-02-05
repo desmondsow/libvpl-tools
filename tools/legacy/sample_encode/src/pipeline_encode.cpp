@@ -2218,6 +2218,15 @@ mfxU32 CEncodingPipeline::GetSufficientBufferSize() {
         mfxU16 tempBRCParamMultiplier =
             par.mfx.BRCParamMultiplier == 0 ? 1 : par.mfx.BRCParamMultiplier;
         new_size = par.mfx.BufferSizeInKB * tempBRCParamMultiplier * 1000u;
+
+        // For 10-bit and higher bit depths, increase buffer size proportionally
+        // to account for larger data size
+        mfxU16 bitDepth = std::max(par.mfx.FrameInfo.BitDepthLuma, par.mfx.FrameInfo.BitDepthChroma);
+        if (bitDepth > 8) {
+            // Increase buffer size by 25% for 10-bit, 50% for 12-bit to ensure sufficient space
+            mfxU32 bitDepthMultiplier = (bitDepth == 10) ? 125 : 150;
+            new_size = (new_size * bitDepthMultiplier) / 100;
+        }
     }
 
     return new_size;
