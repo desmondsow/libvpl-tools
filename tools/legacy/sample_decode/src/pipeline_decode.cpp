@@ -1630,11 +1630,10 @@ mfxStatus CDecodingPipeline::DeliverOutput(mfxFrameSurface1* frame) {
 
     if (m_bExternalAlloc) {
         if (m_eWorkMode == MODE_FILE_DUMP) {
-            // Optimization: Skip Lock/Unlock for null output devices
+            // Optimization: Skip Lock/Unlock/Write for null output devices
             if (m_FileWriter.IsNullOutput()) {
-                // Just call WriteNextFrame without locking - it will return immediately
-                res = m_bOutI420 ? m_FileWriter.WriteNextFrameI420(frame)
-                                 : m_FileWriter.WriteNextFrame(frame);
+                // Skip all operations for null output - just return success
+                res = MFX_ERR_NONE;
             }
             else {
                 res = m_pGeneralAllocator->Lock(m_pGeneralAllocator->pthis,
