@@ -1213,10 +1213,17 @@ mfxStatus CSmplYUVWriter::WriteNextFrame(mfxFrameSurface1* pSurface) {
             mfxU32 totalSize = pInfo.CropW * pInfo.CropH;
             m_writeBuffer.resize(totalSize);
             mfxU8* bufPtr = m_writeBuffer.data();
-            for (i = 0; i < pInfo.CropH; i++) {
-                memcpy(bufPtr + i * pInfo.CropW,
-                       pData.Y + (pInfo.CropY * pData.Pitch + pInfo.CropX) + i * pData.Pitch,
-                       pInfo.CropW);
+
+            // Optimize: if no cropping and pitch matches width, do single large memcpy
+            if (pInfo.CropX == 0 && pInfo.CropY == 0 && pData.Pitch == pInfo.CropW) {
+                memcpy(bufPtr, pData.Y, totalSize);
+            }
+            else {
+                for (i = 0; i < pInfo.CropH; i++) {
+                    memcpy(bufPtr + i * pInfo.CropW,
+                           pData.Y + (pInfo.CropY * pData.Pitch + pInfo.CropX) + i * pData.Pitch,
+                           pInfo.CropW);
+                }
             }
             MSDK_CHECK_NOT_EQUAL(fwrite(bufPtr, 1, totalSize, dstFile),
                                  totalSize,
@@ -1302,23 +1309,42 @@ mfxStatus CSmplYUVWriter::WriteNextFrame(mfxFrameSurface1* pSurface) {
             m_writeBuffer.resize(totalSize);
             mfxU8* bufPtr = m_writeBuffer.data();
 
-            if (pInfo.Shift) {
-                // Convert MS-P*1* to P*1* with batch processing
-                for (i = 0; i < pInfo.CropH; i++) {
-                    mfxU16* shortPtr = (mfxU16*)(pData.Y + (pInfo.CropY * pData.Pitch + pInfo.CropX) +
-                                                 i * pData.Pitch);
-                    mfxU16* outPtr = (mfxU16*)(bufPtr + i * rowSize);
-                    for (int idx = 0; idx < pInfo.CropW; idx++) {
+            // Optimize: if no cropping and pitch matches, do single large operation
+            if (pInfo.CropX == 0 && pInfo.CropY == 0 && pData.Pitch == rowSize) {
+                if (pInfo.Shift) {
+                    // Convert MS-P*1* to P*1* with single-pass processing
+                    mfxU16* shortPtr = (mfxU16*)pData.Y;
+                    mfxU16* outPtr = (mfxU16*)bufPtr;
+                    mfxU32 totalPixels = pInfo.CropW * pInfo.CropH;
+                    for (mfxU32 idx = 0; idx < totalPixels; idx++) {
                         outPtr[idx] = shortPtr[idx] >> shiftSizeLuma;
                     }
                 }
+                else {
+                    // Single large memcpy for contiguous data
+                    memcpy(bufPtr, pData.Y, totalSize);
+                }
             }
             else {
-                // Direct copy without shifting
-                for (i = 0; i < pInfo.CropH; i++) {
-                    mfxU16* shortPtr = (mfxU16*)(pData.Y + (pInfo.CropY * pData.Pitch + pInfo.CropX) +
-                                                 i * pData.Pitch);
-                    memcpy(bufPtr + i * rowSize, shortPtr, rowSize);
+                // Row-by-row processing for cropped data
+                if (pInfo.Shift) {
+                    // Convert MS-P*1* to P*1* with batch processing
+                    for (i = 0; i < pInfo.CropH; i++) {
+                        mfxU16* shortPtr = (mfxU16*)(pData.Y + (pInfo.CropY * pData.Pitch + pInfo.CropX) +
+                                                     i * pData.Pitch);
+                        mfxU16* outPtr = (mfxU16*)(bufPtr + i * rowSize);
+                        for (int idx = 0; idx < pInfo.CropW; idx++) {
+                            outPtr[idx] = shortPtr[idx] >> shiftSizeLuma;
+                        }
+                    }
+                }
+                else {
+                    // Direct copy without shifting
+                    for (i = 0; i < pInfo.CropH; i++) {
+                        mfxU16* shortPtr = (mfxU16*)(pData.Y + (pInfo.CropY * pData.Pitch + pInfo.CropX) +
+                                                     i * pData.Pitch);
+                        memcpy(bufPtr + i * rowSize, shortPtr, rowSize);
+                    }
                 }
             }
             MSDK_CHECK_NOT_EQUAL(fwrite(bufPtr, 1, totalSize, dstFile),
@@ -1393,10 +1419,17 @@ mfxStatus CSmplYUVWriter::WriteNextFrame(mfxFrameSurface1* pSurface) {
             mfxU32 totalSize = ChromaW * ChromaH;
             m_writeBuffer.resize(totalSize);
             mfxU8* bufPtr = m_writeBuffer.data();
-            for (i = 0; i < ChromaH; i++) {
-                memcpy(bufPtr + i * ChromaW,
-                       pData.UV + (pInfo.CropY * pData.Pitch + pInfo.CropX) + i * pData.Pitch,
-                       ChromaW);
+
+            // Optimize: if no cropping and pitch matches, do single large memcpy
+            if (pInfo.CropX == 0 && pInfo.CropY == 0 && pData.Pitch == ChromaW) {
+                memcpy(bufPtr, pData.UV, totalSize);
+            }
+            else {
+                for (i = 0; i < ChromaH; i++) {
+                    memcpy(bufPtr + i * ChromaW,
+                           pData.UV + (pInfo.CropY * pData.Pitch + pInfo.CropX) + i * pData.Pitch,
+                           ChromaW);
+                }
             }
             MSDK_CHECK_NOT_EQUAL(fwrite(bufPtr, 1, totalSize, dstFile),
                                  totalSize,
@@ -1454,23 +1487,42 @@ mfxStatus CSmplYUVWriter::WriteNextFrame(mfxFrameSurface1* pSurface) {
             m_writeBuffer.resize(totalSize);
             mfxU8* bufPtr = m_writeBuffer.data();
 
-            if (pInfo.Shift) {
-                // Convert MS-P*1* to P*1* with batch processing
-                for (i = 0; i < ChromaH; i++) {
-                    mfxU16* shortPtr = (mfxU16*)(pData.UV + (pInfo.CropY * pData.Pitch + pInfo.CropX * 2) +
-                                                  i * pData.Pitch);
-                    mfxU16* outPtr = (mfxU16*)(bufPtr + i * rowSize);
-                    for (mfxU32 idx = 0; idx < ChromaW; idx++) {
+            // Optimize: if no cropping and pitch matches, do single large operation
+            if (pInfo.CropX == 0 && pInfo.CropY == 0 && pData.Pitch == rowSize * 2) {
+                if (pInfo.Shift) {
+                    // Convert MS-P*1* to P*1* with single-pass processing
+                    mfxU16* shortPtr = (mfxU16*)pData.UV;
+                    mfxU16* outPtr = (mfxU16*)bufPtr;
+                    mfxU32 totalPixels = ChromaW * ChromaH;
+                    for (mfxU32 idx = 0; idx < totalPixels; idx++) {
                         outPtr[idx] = shortPtr[idx] >> shiftSizeChroma;
                     }
                 }
+                else {
+                    // Single large memcpy for contiguous data
+                    memcpy(bufPtr, pData.UV, totalSize);
+                }
             }
             else {
-                // Direct copy without shifting
-                for (i = 0; i < ChromaH; i++) {
-                    mfxU16* shortPtr = (mfxU16*)(pData.UV + (pInfo.CropY * pData.Pitch + pInfo.CropX * 2) +
-                                                  i * pData.Pitch);
-                    memcpy(bufPtr + i * rowSize, shortPtr, rowSize);
+                // Row-by-row processing for cropped data
+                if (pInfo.Shift) {
+                    // Convert MS-P*1* to P*1* with batch processing
+                    for (i = 0; i < ChromaH; i++) {
+                        mfxU16* shortPtr = (mfxU16*)(pData.UV + (pInfo.CropY * pData.Pitch + pInfo.CropX * 2) +
+                                                      i * pData.Pitch);
+                        mfxU16* outPtr = (mfxU16*)(bufPtr + i * rowSize);
+                        for (mfxU32 idx = 0; idx < ChromaW; idx++) {
+                            outPtr[idx] = shortPtr[idx] >> shiftSizeChroma;
+                        }
+                    }
+                }
+                else {
+                    // Direct copy without shifting
+                    for (i = 0; i < ChromaH; i++) {
+                        mfxU16* shortPtr = (mfxU16*)(pData.UV + (pInfo.CropY * pData.Pitch + pInfo.CropX * 2) +
+                                                      i * pData.Pitch);
+                        memcpy(bufPtr + i * rowSize, shortPtr, rowSize);
+                    }
                 }
             }
             MSDK_CHECK_NOT_EQUAL(fwrite(bufPtr, 1, totalSize, dstFile),
