@@ -150,6 +150,10 @@ void PrintHelp(char* strAppName, const char* strErrorMessage, ...) {
         "   [-async]                 - depth of asynchronous pipeline. default value is 4. must be between 1 and 20.\n");
     printf(
         "                              Higher values improve performance by allowing parallel encoding operations.\n");
+    printf(
+        "                              CRITICAL FOR PERFORMANCE: Use 4-8 for 4K, 6-12 for high throughput.\n");
+    printf(
+        "                              Low values (1-2) severely limit FPS regardless of buffer size!\n");
     printf("   [-gpucopy::<on,off>] Enable or disable GPU copy mode\n");
     printf("   [-robust:soft]           - Recovery from GPU hang by inserting an IDR\n");
     printf("   [-vbr]                   - variable bitrate control\n");
