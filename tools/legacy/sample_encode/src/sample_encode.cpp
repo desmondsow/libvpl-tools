@@ -323,7 +323,19 @@ void PrintHelp(char* strAppName, const char* strErrorMessage, ...) {
     printf(
         "   [-api_ver_init::<1x,2x>]  - select the api version for the session initialization\n");
     printf("   [-rbf] - read frame-by-frame from the input (sw lib only)\n");
-
+    printf("\n");
+    printf("PERFORMANCE NOTES:\n");
+    printf("   Hardware encoding performance depends on multiple factors:\n");
+    printf("   1. Software parameters: -async (most important), buffer size, -gpucopy\n");
+    printf("   2. Hardware capabilities: GPU encoder units, memory bandwidth\n");
+    printf("   3. Power/Thermal limits: CPU/GPU TDP, cooling, power profiles\n");
+    printf("\n");
+    printf("   If FPS remains low despite correct -async and buffer settings:\n");
+    printf("   - Check CPU/GPU power consumption (e.g., via 'intel_gpu_top' or task manager)\n");
+    printf("   - Low-power CPUs (15W TDP) may throttle GPU encoder to save power\n");
+    printf("   - Expected 4K 10-bit FPS: Desktop GPUs ~150-200, Laptop 15W ~40-60\n");
+    printf("   - Solutions: AC power mode, disable battery saving, better cooling\n");
+    printf("\n");
 #if D3D_SURFACES_SUPPORT
     printf("   [-d3d] - work with d3d surfaces\n");
     printf("   [-d3d11] - work with d3d11 surfaces\n");
