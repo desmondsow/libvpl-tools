@@ -2216,6 +2216,38 @@ mfxStatus CEncodingPipeline::OpenRoundingOffsetFile(sInputParams* pInParams) {
     return MFX_ERR_NONE;
 }
 
+/* GetSufficientBufferSize: Calculate output bitstream buffer size
+ *
+ * BUFFER SIZE CALCULATION:
+ * Base formula: BufferSizeInKB (from params or bitrate/8) * 1000 bytes
+ * For 10-bit: Multiply by 1.25 (125%)
+ * For 12-bit: Multiply by 1.50 (150%)
+ *
+ * MANUAL OVERRIDE FOR TESTING:
+ * To verify buffer size impact on 10-bit encoding, use -BufferSizeInKB parameter:
+ *
+ * 1. Calculate base buffer size:
+ *    Base = Bitrate_Kbps / 8
+ *    Example: -b 30000 -> Base = 30000/8 = 3750 KB
+ *
+ * 2. For 10-bit encoding, multiply by 1.25:
+ *    10-bit BufferSize = Base * 1.25
+ *    Example: 3750 * 1.25 = 4688 KB
+ *
+ * 3. Test with undersized buffer (should see low FPS):
+ *    sample_encode h265 -p010 -i input.yuv -o output.h265 -w 3840 -h 2160 \
+ *                  -b 30000 -hw -async 4 -BufferSizeInKB 3750
+ *    Expected: Low FPS (~43) due to buffer starvation
+ *
+ * 4. Test with properly sized buffer (should see high FPS):
+ *    sample_encode h265 -p010 -i input.yuv -o output.h265 -w 3840 -h 2160 \
+ *                  -b 30000 -hw -async 4 -BufferSizeInKB 4688
+ *    Expected: High FPS (~173) with adequate buffer
+ *
+ * NOTE: Without -BufferSizeInKB parameter, this function automatically
+ * applies the bit-depth adjustment, so manual specification is only needed
+ * for testing/verification purposes.
+ */
 mfxU32 CEncodingPipeline::GetSufficientBufferSize() {
     if (!GetFirstEncoder()) {
         printf("ERROR: GetFirstEncoder() fail \n");

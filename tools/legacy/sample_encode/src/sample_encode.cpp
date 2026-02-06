@@ -229,6 +229,10 @@ void PrintHelp(char* strAppName, const char* strErrorMessage, ...) {
     printf(
         "   [-BufferSizeInKB ]       - represents the maximum possible size of any compressed frames\n");
     printf(
+        "                              Default: bitrate/8 (1 second of video). For 10-bit, use 1.25x this value.\n");
+    printf(
+        "                              Example: -b 30000 (30 Mbps) -> BufferSizeInKB ~3750 for 8-bit, ~4688 for 10-bit\n");
+    printf(
         "   [-MaxKbps ]              - for variable bitrate control, specifies the maximum bitrate at which \n");
     printf(
         "                              the encoded data enters the Video Buffering Verifier buffer\n");
