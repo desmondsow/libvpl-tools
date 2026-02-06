@@ -1042,6 +1042,13 @@ mfxStatus CSmplYUVWriter::Init(const char* strFileName, const mfxU32 numViews) {
     if (!m_bIsMultiView) {
         MSDK_FOPEN(m_fDest, m_sFile.c_str(), "wb");
         MSDK_CHECK_POINTER(m_fDest, MFX_ERR_NULL_PTR);
+        // Set large buffer to improve write performance for high-resolution video
+        if (setvbuf(m_fDest, NULL, _IOFBF, 4 * 1024 * 1024) != 0) {
+            // setvbuf failed, will use default buffering (reduced performance)
+            fprintf(stderr,
+                    "Warning: Failed to set 4MB buffer for output file, "
+                    "performance may be reduced\n");
+        }
         ++m_numCreatedFiles;
     }
     else {
@@ -1053,6 +1060,14 @@ mfxStatus CSmplYUVWriter::Init(const char* strFileName, const mfxU32 numViews) {
         for (i = 0; i < numViews; ++i) {
             MSDK_FOPEN(m_fDestMVC[i], FormMVCFileName(m_sFile.c_str(), i).c_str(), "wb");
             MSDK_CHECK_POINTER(m_fDestMVC[i], MFX_ERR_NULL_PTR);
+            // Set large buffer to improve write performance for high-resolution video
+            if (setvbuf(m_fDestMVC[i], NULL, _IOFBF, 4 * 1024 * 1024) != 0) {
+                // setvbuf failed, will use default buffering (reduced performance)
+                fprintf(stderr,
+                        "Warning: Failed to set 4MB buffer for output file %d, "
+                        "performance may be reduced\n",
+                        i);
+            }
             ++m_numCreatedFiles;
         }
     }
