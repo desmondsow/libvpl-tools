@@ -1208,88 +1208,122 @@ mfxStatus CSmplYUVWriter::WriteNextFrame(mfxFrameSurface1* pSurface) {
         case MFX_FOURCC_NV12:
         case MFX_FOURCC_I420:
         case MFX_FOURCC_I422:
-        case MFX_FOURCC_NV16:
+        case MFX_FOURCC_NV16: {
+            // Batch write: copy all rows to buffer then write once
+            mfxU32 totalSize = pInfo.CropW * pInfo.CropH;
+            m_writeBuffer.resize(totalSize);
+            mfxU8* bufPtr = m_writeBuffer.data();
             for (i = 0; i < pInfo.CropH; i++) {
-                MSDK_CHECK_NOT_EQUAL(
-                    fwrite(pData.Y + (pInfo.CropY * pData.Pitch + pInfo.CropX) + i * pData.Pitch,
-                           1,
-                           pInfo.CropW,
-                           dstFile),
-                    pInfo.CropW,
-                    MFX_ERR_UNDEFINED_BEHAVIOR);
+                memcpy(bufPtr + i * pInfo.CropW,
+                       pData.Y + (pInfo.CropY * pData.Pitch + pInfo.CropX) + i * pData.Pitch,
+                       pInfo.CropW);
             }
+            MSDK_CHECK_NOT_EQUAL(fwrite(bufPtr, 1, totalSize, dstFile),
+                                 totalSize,
+                                 MFX_ERR_UNDEFINED_BEHAVIOR);
             break;
+        }
         case MFX_FOURCC_Y210:
         case MFX_FOURCC_Y216: // Luma and chroma will be filled below
         {
+            // Batch write: copy all rows to buffer then write once
+            mfxU32 rowSize = pInfo.CropW * 4;
+            mfxU32 totalSize = rowSize * pInfo.CropH;
+            m_writeBuffer.resize(totalSize);
+            mfxU8* bufPtr = m_writeBuffer.data();
             for (i = 0; i < pInfo.CropH; i++) {
                 mfxU8* pBuffer = ((mfxU8*)pData.Y) + (pInfo.CropY * pData.Pitch + pInfo.CropX * 4) +
                                  i * pData.Pitch;
-                MSDK_CHECK_NOT_EQUAL(fwrite(pBuffer, 4, pInfo.CropW, dstFile),
-                                     pInfo.CropW,
-                                     MFX_ERR_UNDEFINED_BEHAVIOR);
+                memcpy(bufPtr + i * rowSize, pBuffer, rowSize);
             }
+            MSDK_CHECK_NOT_EQUAL(fwrite(bufPtr, 1, totalSize, dstFile),
+                                 totalSize,
+                                 MFX_ERR_UNDEFINED_BEHAVIOR);
             return MFX_ERR_NONE;
         } break;
         case MFX_FOURCC_Y410: // Luma and chroma will be filled below
         {
+            // Batch write: copy all rows to buffer then write once
+            mfxU32 rowSize = pInfo.CropW * 4;
+            mfxU32 totalSize = rowSize * pInfo.CropH;
+            m_writeBuffer.resize(totalSize);
+            mfxU8* bufPtr = m_writeBuffer.data();
             mfxU8* pBuffer = (mfxU8*)pData.Y410;
             for (i = 0; i < pInfo.CropH; i++) {
-                MSDK_CHECK_NOT_EQUAL(
-                    fwrite(
-                        pBuffer + (pInfo.CropY * pData.Pitch + pInfo.CropX * 4) + i * pData.Pitch,
-                        4,
-                        pInfo.CropW,
-                        dstFile),
-                    pInfo.CropW,
-                    MFX_ERR_UNDEFINED_BEHAVIOR);
+                memcpy(bufPtr + i * rowSize,
+                       pBuffer + (pInfo.CropY * pData.Pitch + pInfo.CropX * 4) + i * pData.Pitch,
+                       rowSize);
             }
+            MSDK_CHECK_NOT_EQUAL(fwrite(bufPtr, 1, totalSize, dstFile),
+                                 totalSize,
+                                 MFX_ERR_UNDEFINED_BEHAVIOR);
             return MFX_ERR_NONE;
         } break;
         case MFX_FOURCC_Y416: // Luma and chroma will be filled below
         {
+            // Batch write: copy all rows to buffer then write once
+            mfxU32 rowSize = pInfo.CropW * 8;
+            mfxU32 totalSize = rowSize * pInfo.CropH;
+            m_writeBuffer.resize(totalSize);
+            mfxU8* bufPtr = m_writeBuffer.data();
             for (i = 0; i < pInfo.CropH; i++) {
                 mfxU8* pBuffer = ((mfxU8*)pData.U) + (pInfo.CropY * pData.Pitch + pInfo.CropX * 8) +
                                  i * pData.Pitch;
-                MSDK_CHECK_NOT_EQUAL(fwrite(pBuffer, 8, pInfo.CropW, dstFile),
-                                     pInfo.CropW,
-                                     MFX_ERR_UNDEFINED_BEHAVIOR);
+                memcpy(bufPtr + i * rowSize, pBuffer, rowSize);
             }
+            MSDK_CHECK_NOT_EQUAL(fwrite(bufPtr, 1, totalSize, dstFile),
+                                 totalSize,
+                                 MFX_ERR_UNDEFINED_BEHAVIOR);
             return MFX_ERR_NONE;
         } break;
         case MFX_FOURCC_I010:
-        case MFX_FOURCC_I210:
+        case MFX_FOURCC_I210: {
+            // Batch write: copy all rows to buffer then write once
+            mfxU32 rowSize = (mfxU32)pInfo.CropW * 2;
+            mfxU32 totalSize = rowSize * pInfo.CropH;
+            m_writeBuffer.resize(totalSize);
+            mfxU8* bufPtr = m_writeBuffer.data();
             for (i = 0; i < pInfo.CropH; i++) {
                 mfxU16* shortPtr = (mfxU16*)(pData.Y + (pInfo.CropY * pData.Pitch + pInfo.CropX) +
                                              i * pData.Pitch);
-                MSDK_CHECK_NOT_EQUAL(fwrite(shortPtr, 1, (mfxU32)pInfo.CropW * 2, dstFile),
-                                     (mfxU32)pInfo.CropW * 2,
-                                     MFX_ERR_UNDEFINED_BEHAVIOR);
+                memcpy(bufPtr + i * rowSize, shortPtr, rowSize);
             }
+            MSDK_CHECK_NOT_EQUAL(fwrite(bufPtr, 1, totalSize, dstFile),
+                                 totalSize,
+                                 MFX_ERR_UNDEFINED_BEHAVIOR);
             break;
+        }
         case MFX_FOURCC_P010:
         case MFX_FOURCC_P016:
         case MFX_FOURCC_P210: {
-            for (i = 0; i < pInfo.CropH; i++) {
-                mfxU16* shortPtr = (mfxU16*)(pData.Y + (pInfo.CropY * pData.Pitch + pInfo.CropX) +
-                                             i * pData.Pitch);
-                if (pInfo.Shift) {
-                    // Convert MS-P*1* to P*1* and write
-                    // Bits will be shifted to the lower position
-                    for (int idx = 0; idx < pInfo.CropW; idx++) {
-                        tmp[idx] = shortPtr[idx] >> shiftSizeLuma;
-                    }
+            // Batch write: copy all rows to buffer then write once
+            mfxU32 rowSize = (mfxU32)pInfo.CropW * 2;
+            mfxU32 totalSize = rowSize * pInfo.CropH;
+            m_writeBuffer.resize(totalSize);
+            mfxU8* bufPtr = m_writeBuffer.data();
 
-                    MSDK_CHECK_NOT_EQUAL(fwrite(&tmp[0], 1, (mfxU32)pInfo.CropW * 2, dstFile),
-                                         (mfxU32)pInfo.CropW * 2,
-                                         MFX_ERR_UNDEFINED_BEHAVIOR);
-                }
-                else {
-                    MSDK_CHECK_NOT_EQUAL(fwrite(shortPtr, 1, (mfxU32)pInfo.CropW * 2, dstFile),
-                                         (mfxU32)pInfo.CropW * 2,
-                                         MFX_ERR_UNDEFINED_BEHAVIOR);
+            if (pInfo.Shift) {
+                // Convert MS-P*1* to P*1* with batch processing
+                for (i = 0; i < pInfo.CropH; i++) {
+                    mfxU16* shortPtr = (mfxU16*)(pData.Y + (pInfo.CropY * pData.Pitch + pInfo.CropX) +
+                                                 i * pData.Pitch);
+                    mfxU16* outPtr = (mfxU16*)(bufPtr + i * rowSize);
+                    for (int idx = 0; idx < pInfo.CropW; idx++) {
+                        outPtr[idx] = shortPtr[idx] >> shiftSizeLuma;
+                    }
                 }
             }
+            else {
+                // Direct copy without shifting
+                for (i = 0; i < pInfo.CropH; i++) {
+                    mfxU16* shortPtr = (mfxU16*)(pData.Y + (pInfo.CropY * pData.Pitch + pInfo.CropX) +
+                                                 i * pData.Pitch);
+                    memcpy(bufPtr + i * rowSize, shortPtr, rowSize);
+                }
+            }
+            MSDK_CHECK_NOT_EQUAL(fwrite(bufPtr, 1, totalSize, dstFile),
+                                 totalSize,
+                                 MFX_ERR_UNDEFINED_BEHAVIOR);
 
             break;
         }
@@ -1306,121 +1340,142 @@ mfxStatus CSmplYUVWriter::WriteNextFrame(mfxFrameSurface1* pSurface) {
     }
     switch (pInfo.FourCC) {
         case MFX_FOURCC_YV12: {
+            // Batch write V plane
+            mfxU32 totalSize = ChromaW * ChromaH;
+            m_writeBuffer.resize(totalSize);
+            mfxU8* bufPtr = m_writeBuffer.data();
             for (i = 0; i < ChromaH; i++) {
-                MSDK_CHECK_NOT_EQUAL(
-                    fwrite(pData.V + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX / 2) +
-                               i * pData.Pitch,
-                           1,
-                           ChromaW,
-                           dstFile),
-                    ChromaW,
-                    MFX_ERR_UNDEFINED_BEHAVIOR);
+                memcpy(bufPtr + i * ChromaW,
+                       pData.V + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX / 2) + i * pData.Pitch,
+                       ChromaW);
             }
+            MSDK_CHECK_NOT_EQUAL(fwrite(bufPtr, 1, totalSize, dstFile),
+                                 totalSize,
+                                 MFX_ERR_UNDEFINED_BEHAVIOR);
+            // Batch write U plane
             for (i = 0; i < ChromaH; i++) {
-                MSDK_CHECK_NOT_EQUAL(
-                    fwrite(pData.U + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX / 2) +
-                               i * pData.Pitch / 2,
-                           1,
-                           ChromaW,
-                           dstFile),
-                    ChromaW,
-                    MFX_ERR_UNDEFINED_BEHAVIOR);
+                memcpy(bufPtr + i * ChromaW,
+                       pData.U + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX / 2) + i * pData.Pitch / 2,
+                       ChromaW);
             }
+            MSDK_CHECK_NOT_EQUAL(fwrite(bufPtr, 1, totalSize, dstFile),
+                                 totalSize,
+                                 MFX_ERR_UNDEFINED_BEHAVIOR);
             break;
         }
         case MFX_FOURCC_I420:
         case MFX_FOURCC_I422: {
+            // Batch write U plane
+            mfxU32 totalSize = ChromaW * ChromaH;
+            m_writeBuffer.resize(totalSize);
+            mfxU8* bufPtr = m_writeBuffer.data();
             for (i = 0; i < ChromaH; i++) {
-                MSDK_CHECK_NOT_EQUAL(
-                    fwrite(pData.U + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX / 2) +
-                               i * pData.Pitch / 2,
-                           1,
-                           ChromaW,
-                           dstFile),
-                    ChromaW,
-                    MFX_ERR_UNDEFINED_BEHAVIOR);
+                memcpy(bufPtr + i * ChromaW,
+                       pData.U + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX / 2) + i * pData.Pitch / 2,
+                       ChromaW);
             }
+            MSDK_CHECK_NOT_EQUAL(fwrite(bufPtr, 1, totalSize, dstFile),
+                                 totalSize,
+                                 MFX_ERR_UNDEFINED_BEHAVIOR);
+            // Batch write V plane
             for (i = 0; i < ChromaH; i++) {
-                MSDK_CHECK_NOT_EQUAL(
-                    fwrite(pData.V + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX / 2) +
-                               i * pData.Pitch / 2,
-                           1,
-                           ChromaW,
-                           dstFile),
-                    ChromaW,
-                    MFX_ERR_UNDEFINED_BEHAVIOR);
+                memcpy(bufPtr + i * ChromaW,
+                       pData.V + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX / 2) + i * pData.Pitch / 2,
+                       ChromaW);
             }
+            MSDK_CHECK_NOT_EQUAL(fwrite(bufPtr, 1, totalSize, dstFile),
+                                 totalSize,
+                                 MFX_ERR_UNDEFINED_BEHAVIOR);
             break;
         }
         case MFX_FOURCC_NV12: {
+            // Batch write UV plane
+            mfxU32 totalSize = ChromaW * ChromaH;
+            m_writeBuffer.resize(totalSize);
+            mfxU8* bufPtr = m_writeBuffer.data();
             for (i = 0; i < ChromaH; i++) {
-                MSDK_CHECK_NOT_EQUAL(
-                    fwrite(pData.UV + (pInfo.CropY * pData.Pitch + pInfo.CropX) + i * pData.Pitch,
-                           1,
-                           ChromaW,
-                           dstFile),
-                    ChromaW,
-                    MFX_ERR_UNDEFINED_BEHAVIOR);
+                memcpy(bufPtr + i * ChromaW,
+                       pData.UV + (pInfo.CropY * pData.Pitch + pInfo.CropX) + i * pData.Pitch,
+                       ChromaW);
             }
+            MSDK_CHECK_NOT_EQUAL(fwrite(bufPtr, 1, totalSize, dstFile),
+                                 totalSize,
+                                 MFX_ERR_UNDEFINED_BEHAVIOR);
             break;
         }
         case MFX_FOURCC_NV16: {
+            // Batch write UV plane
+            mfxU32 totalSize = ChromaW * ChromaH;
+            m_writeBuffer.resize(totalSize);
+            mfxU8* bufPtr = m_writeBuffer.data();
             for (i = 0; i < ChromaH; i++) {
-                MSDK_CHECK_NOT_EQUAL(
-                    fwrite(
-                        pData.UV + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX) + i * pData.Pitch,
-                        1,
-                        ChromaW,
-                        dstFile),
-                    ChromaW,
-                    MFX_ERR_UNDEFINED_BEHAVIOR);
+                memcpy(bufPtr + i * ChromaW,
+                       pData.UV + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX) + i * pData.Pitch,
+                       ChromaW);
             }
+            MSDK_CHECK_NOT_EQUAL(fwrite(bufPtr, 1, totalSize, dstFile),
+                                 totalSize,
+                                 MFX_ERR_UNDEFINED_BEHAVIOR);
             break;
         }
         case MFX_FOURCC_I010:
         case MFX_FOURCC_I210: {
+            // Batch write U and V planes
             mfxU16 chPitch = pData.Pitch / 2;
             mfxU32 basePtr = (pInfo.CropY * chPitch + pInfo.CropX / 2);
+            mfxU32 totalSize = ChromaW * ChromaH;
+            m_writeBuffer.resize(totalSize);
+            mfxU8* bufPtr = m_writeBuffer.data();
 
+            // Write U plane
             for (i = 0; i < ChromaH; i++) {
-                MSDK_CHECK_NOT_EQUAL(fwrite(pData.U + basePtr + i * chPitch, 1, ChromaW, dstFile),
-                                     ChromaW,
-                                     MFX_ERR_UNDEFINED_BEHAVIOR);
+                memcpy(bufPtr + i * ChromaW, pData.U + basePtr + i * chPitch, ChromaW);
             }
+            MSDK_CHECK_NOT_EQUAL(fwrite(bufPtr, 1, totalSize, dstFile),
+                                 totalSize,
+                                 MFX_ERR_UNDEFINED_BEHAVIOR);
 
+            // Write V plane
             basePtr = (pInfo.CropY * chPitch + pInfo.CropX / 2);
-
             for (i = 0; i < ChromaH; i++) {
-                MSDK_CHECK_NOT_EQUAL(fwrite(pData.V + basePtr + i * chPitch, 1, ChromaW, dstFile),
-                                     ChromaW,
-                                     MFX_ERR_UNDEFINED_BEHAVIOR);
+                memcpy(bufPtr + i * ChromaW, pData.V + basePtr + i * chPitch, ChromaW);
             }
+            MSDK_CHECK_NOT_EQUAL(fwrite(bufPtr, 1, totalSize, dstFile),
+                                 totalSize,
+                                 MFX_ERR_UNDEFINED_BEHAVIOR);
             break;
         }
         case MFX_FOURCC_P010:
         case MFX_FOURCC_P016:
         case MFX_FOURCC_P210: {
-            for (i = 0; i < ChromaH; i++) {
-                mfxU16* shortPtr =
-                    (mfxU16*)(pData.UV + (pInfo.CropY * pData.Pitch + pInfo.CropX * 2) +
-                              i * pData.Pitch);
-                if (pInfo.Shift) {
-                    // Convert MS-P*1* to P*1* and write
-                    // Bits will be shifted to the lower position
-                    for (mfxU32 idx = 0; idx < ChromaW; idx++) {
-                        tmp[idx] = shortPtr[idx] >> shiftSizeChroma;
-                    }
+            // Batch write UV plane
+            mfxU32 rowSize = ChromaW * 2;
+            mfxU32 totalSize = rowSize * ChromaH;
+            m_writeBuffer.resize(totalSize);
+            mfxU8* bufPtr = m_writeBuffer.data();
 
-                    MSDK_CHECK_NOT_EQUAL(fwrite(&tmp[0], 1, ChromaW * 2, dstFile),
-                                         (mfxU32)ChromaW * 2,
-                                         MFX_ERR_UNDEFINED_BEHAVIOR);
-                }
-                else {
-                    MSDK_CHECK_NOT_EQUAL(fwrite(shortPtr, 1, ChromaW * 2, dstFile),
-                                         ChromaW * 2,
-                                         MFX_ERR_UNDEFINED_BEHAVIOR);
+            if (pInfo.Shift) {
+                // Convert MS-P*1* to P*1* with batch processing
+                for (i = 0; i < ChromaH; i++) {
+                    mfxU16* shortPtr = (mfxU16*)(pData.UV + (pInfo.CropY * pData.Pitch + pInfo.CropX * 2) +
+                                                  i * pData.Pitch);
+                    mfxU16* outPtr = (mfxU16*)(bufPtr + i * rowSize);
+                    for (mfxU32 idx = 0; idx < ChromaW; idx++) {
+                        outPtr[idx] = shortPtr[idx] >> shiftSizeChroma;
+                    }
                 }
             }
+            else {
+                // Direct copy without shifting
+                for (i = 0; i < ChromaH; i++) {
+                    mfxU16* shortPtr = (mfxU16*)(pData.UV + (pInfo.CropY * pData.Pitch + pInfo.CropX * 2) +
+                                                  i * pData.Pitch);
+                    memcpy(bufPtr + i * rowSize, shortPtr, rowSize);
+                }
+            }
+            MSDK_CHECK_NOT_EQUAL(fwrite(bufPtr, 1, totalSize, dstFile),
+                                 (mfxU32)totalSize,
+                                 MFX_ERR_UNDEFINED_BEHAVIOR);
             break;
         }
 
@@ -1429,16 +1484,21 @@ mfxStatus CSmplYUVWriter::WriteNextFrame(mfxFrameSurface1* pSurface) {
         case MFX_FOURCC_AYUV:
         case MFX_FOURCC_YUY2:
         case MFX_FOURCC_A2RGB10: {
+            // Batch write: copy all rows to buffer then write once
             mfxU8* ptr;
             ptr = std::min({ pData.R, pData.G, pData.B });
             ptr = ptr + pInfo.CropX + pInfo.CropY * pData.Pitch;
+            mfxU32 rowSize = 4 * ChromaW;
+            mfxU32 totalSize = rowSize * ChromaH;
+            m_writeBuffer.resize(totalSize);
+            mfxU8* bufPtr = m_writeBuffer.data();
 
             for (i = 0; i < ChromaH; i++) {
-                MSDK_CHECK_NOT_EQUAL(fwrite(ptr + i * pData.Pitch, 1, 4 * ChromaW, dstFile),
-                                     4 * ChromaW,
-                                     MFX_ERR_UNDEFINED_BEHAVIOR);
+                memcpy(bufPtr + i * rowSize, ptr + i * pData.Pitch, rowSize);
             }
-            fflush(dstFile);
+            MSDK_CHECK_NOT_EQUAL(fwrite(bufPtr, 1, totalSize, dstFile),
+                                 totalSize,
+                                 MFX_ERR_UNDEFINED_BEHAVIOR);
             break;
         }
 

@@ -883,6 +883,7 @@ protected:
     mfxU32 m_numCreatedFiles;
     std::string m_sFile;
     mfxU32 m_nViews;
+    std::vector<mfxU8> m_writeBuffer;  // Frame-level write buffer for batched I/O
 };
 
 class CSmplBitstreamReader {
