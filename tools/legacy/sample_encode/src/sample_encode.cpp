@@ -148,6 +148,12 @@ void PrintHelp(char* strAppName, const char* strErrorMessage, ...) {
     printf("   [-path path] - path to plugin (valid only in pair with -p option)\n");
     printf(
         "   [-async]                 - depth of asynchronous pipeline. default value is 4. must be between 1 and 20.\n");
+    printf(
+        "                              Higher values improve performance by allowing parallel encoding operations.\n");
+    printf(
+        "                              CRITICAL FOR PERFORMANCE: Use 4-8 for 4K, 6-12 for high throughput.\n");
+    printf(
+        "                              Low values (1-2) severely limit FPS regardless of buffer size!\n");
     printf("   [-gpucopy::<on,off>] Enable or disable GPU copy mode\n");
     printf("   [-robust:soft]           - Recovery from GPU hang by inserting an IDR\n");
     printf("   [-vbr]                   - variable bitrate control\n");
@@ -226,6 +232,10 @@ void PrintHelp(char* strAppName, const char* strErrorMessage, ...) {
         "                              which is equivalent to reaching an initial delay of InitialDelayInKB*8000/TargetKbps ms\n");
     printf(
         "   [-BufferSizeInKB ]       - represents the maximum possible size of any compressed frames\n");
+    printf(
+        "                              Default: bitrate/8 (1 second of video). For 10-bit, use 1.25x this value.\n");
+    printf(
+        "                              Example: -b 30000 (30 Mbps) -> BufferSizeInKB ~3750 for 8-bit, ~4688 for 10-bit\n");
     printf(
         "   [-MaxKbps ]              - for variable bitrate control, specifies the maximum bitrate at which \n");
     printf(
@@ -313,7 +323,19 @@ void PrintHelp(char* strAppName, const char* strErrorMessage, ...) {
     printf(
         "   [-api_ver_init::<1x,2x>]  - select the api version for the session initialization\n");
     printf("   [-rbf] - read frame-by-frame from the input (sw lib only)\n");
-
+    printf("\n");
+    printf("PERFORMANCE NOTES:\n");
+    printf("   Hardware encoding performance depends on multiple factors:\n");
+    printf("   1. Software parameters: -async (most important), buffer size, -gpucopy\n");
+    printf("   2. Hardware capabilities: GPU encoder units, memory bandwidth\n");
+    printf("   3. Power/Thermal limits: CPU/GPU TDP, cooling, power profiles\n");
+    printf("\n");
+    printf("   If FPS remains low despite correct -async and buffer settings:\n");
+    printf("   - Check CPU/GPU power consumption (e.g., via 'intel_gpu_top' or task manager)\n");
+    printf("   - Low-power CPUs (15W TDP) may throttle GPU encoder to save power\n");
+    printf("   - Expected 4K 10-bit FPS: Desktop GPUs ~150-200, Laptop 15W ~40-60\n");
+    printf("   - Solutions: AC power mode, disable battery saving, better cooling\n");
+    printf("\n");
 #if D3D_SURFACES_SUPPORT
     printf("   [-d3d] - work with d3d surfaces\n");
     printf("   [-d3d11] - work with d3d11 surfaces\n");

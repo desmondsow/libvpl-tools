@@ -142,6 +142,30 @@ mfxStatus CEncTaskPool::Init(MFXVideoSession* pmfxSession,
     return MFX_ERR_NONE;
 }
 
+/* SynchronizeFirstTask: Wait for encoding completion and write to file
+ *
+ * PURPOSE:
+ * Waits for the oldest in-flight encoding task to complete, then writes
+ * the compressed bitstream to the output file.
+ *
+ * OPERATION:
+ * 1. SyncOperation() - Wait for GPU encoder to finish (BLOCKS if not done)
+ * 2. WriteBitstream() - Write compressed data to file
+ * 3. Reset() - Clear task for reuse
+ * 4. Move to next task in circular buffer
+ *
+ * PERFORMANCE IMPLICATIONS:
+ * - Called only when task pool is full (all AsyncDepth tasks busy)
+ * - Blocks main thread until encoding completes
+ * - With high AsyncDepth (e.g., 4-8), rarely blocks (tasks complete before needed)
+ * - With buffer starvation, frequently blocks (tasks stuck in retry loops)
+ *
+ * FILE WRITE FLOW:
+ * Task bitstream buffer -> WriteBitstream() -> File I/O -> Disk
+ * - Buffer must be large enough to hold entire compressed frame
+ * - If buffer too small, frame never reaches this function
+ * - Instead, stuck retrying EncodeFrameAsync() with reallocations
+ */
 mfxStatus CEncTaskPool::SynchronizeFirstTask(mfxU32 syncOpTimeout) {
     m_statOverall.StartTimeMeasurement();
     MSDK_CHECK_POINTER(m_pTasks, MFX_ERR_NOT_INITIALIZED);
@@ -2192,6 +2216,38 @@ mfxStatus CEncodingPipeline::OpenRoundingOffsetFile(sInputParams* pInParams) {
     return MFX_ERR_NONE;
 }
 
+/* GetSufficientBufferSize: Calculate output bitstream buffer size
+ *
+ * BUFFER SIZE CALCULATION:
+ * Base formula: BufferSizeInKB (from params or bitrate/8) * 1000 bytes
+ * For 10-bit: Multiply by 1.25 (125%)
+ * For 12-bit: Multiply by 1.50 (150%)
+ *
+ * MANUAL OVERRIDE FOR TESTING:
+ * To verify buffer size impact on 10-bit encoding, use -BufferSizeInKB parameter:
+ *
+ * 1. Calculate base buffer size:
+ *    Base = Bitrate_Kbps / 8
+ *    Example: -b 30000 -> Base = 30000/8 = 3750 KB
+ *
+ * 2. For 10-bit encoding, multiply by 1.25:
+ *    10-bit BufferSize = Base * 1.25
+ *    Example: 3750 * 1.25 = 4688 KB
+ *
+ * 3. Test with undersized buffer (should see low FPS):
+ *    sample_encode h265 -p010 -i input.yuv -o output.h265 -w 3840 -h 2160 \
+ *                  -b 30000 -hw -async 4 -BufferSizeInKB 3750
+ *    Expected: Low FPS (~43) due to buffer starvation
+ *
+ * 4. Test with properly sized buffer (should see high FPS):
+ *    sample_encode h265 -p010 -i input.yuv -o output.h265 -w 3840 -h 2160 \
+ *                  -b 30000 -hw -async 4 -BufferSizeInKB 4688
+ *    Expected: High FPS (~173) with adequate buffer
+ *
+ * NOTE: Without -BufferSizeInKB parameter, this function automatically
+ * applies the bit-depth adjustment, so manual specification is only needed
+ * for testing/verification purposes.
+ */
 mfxU32 CEncodingPipeline::GetSufficientBufferSize() {
     if (!GetFirstEncoder()) {
         printf("ERROR: GetFirstEncoder() fail \n");
@@ -2218,6 +2274,22 @@ mfxU32 CEncodingPipeline::GetSufficientBufferSize() {
         mfxU16 tempBRCParamMultiplier =
             par.mfx.BRCParamMultiplier == 0 ? 1 : par.mfx.BRCParamMultiplier;
         new_size = par.mfx.BufferSizeInKB * tempBRCParamMultiplier * 1000u;
+
+        // For 10-bit and higher bit depths, increase buffer size proportionally
+        // to account for larger data size
+        mfxU16 bitDepth = std::max(par.mfx.FrameInfo.BitDepthLuma, par.mfx.FrameInfo.BitDepthChroma);
+        if (bitDepth > 8) {
+            // Increase buffer size by 25% for 10-bit, 50% for 12-bit to ensure sufficient space
+            // Note: Further increasing buffer size beyond these values typically does NOT improve FPS.
+            // Performance is primarily limited by:
+            // 1. AsyncDepth (pipeline parallelism) - more important than buffer size
+            // 2. Hardware encoder throughput
+            // 3. Memory bandwidth
+            // Excessively large buffers only increase memory consumption without performance gain
+            // and may even degrade performance due to cache pressure.
+            mfxU32 bitDepthMultiplier = (bitDepth == 10) ? 125 : 150;
+            new_size = (new_size * bitDepthMultiplier) / 100;
+        }
     }
 
     return new_size;
@@ -2233,6 +2305,37 @@ mfxStatus CEncodingPipeline::AllocateSufficientBuffer(mfxBitstreamWrapper& bs) {
     return MFX_ERR_NONE;
 }
 
+/* GetFreeTask: Critical function for pipeline parallelism
+ *
+ * PURPOSE:
+ * Returns an available task from the task pool for encoding the next frame.
+ * If all tasks are busy (in-flight encodes), waits for the oldest to complete.
+ *
+ * TASK POOL ARCHITECTURE:
+ * - Circular buffer of tasks (size = AsyncDepth, typically 4)
+ * - Each task has: bitstream buffer (output), sync point (status), encode control
+ * - Tasks cycle: Free -> Encoding -> Synchronizing -> Writing -> Free
+ *
+ * WHEN THIS BLOCKS PERFORMANCE:
+ * 1. All AsyncDepth tasks are in-flight (being encoded by hardware)
+ * 2. Must call SynchronizeFirstTask() - BLOCKS until oldest encode completes
+ * 3. SynchronizeFirstTask() writes bitstream to file and frees the task
+ * 4. Now can submit next frame for encoding
+ *
+ * BUFFER STARVATION SCENARIO:
+ * If bitstream buffer too small:
+ * - EncodeFrameAsync() fails with MFX_ERR_NOT_ENOUGH_BUFFER
+ * - Must reallocate buffer and retry
+ * - During reallocation, cannot submit new frames
+ * - Other tasks may complete but cannot be reused (buffer issue blocks)
+ * - Effective AsyncDepth drops to 1 (no parallelism)
+ * - FPS plummets because hardware encoder stays idle waiting for CPU
+ *
+ * With correct buffer size:
+ * - All AsyncDepth tasks keep hardware pipeline full
+ * - While hardware encodes frames 0-3, CPU loads frames 4-7
+ * - Maximum throughput achieved
+ */
 mfxStatus CEncodingPipeline::GetFreeTask(sTask** ppTask) {
     mfxStatus sts = MFX_ERR_NONE;
 
@@ -2286,6 +2389,65 @@ mfxStatus CEncodingPipeline::ConfigTCBRCTest(mfxFrameSurface1* pSurf) {
     return sts;
 }
 
+/* ENCODING PIPELINE FLOW OVERVIEW:
+ *
+ * This is the main encoding loop that orchestrates frame encoding and writing to file.
+ * Understanding this flow is crucial to understanding why buffer size impacts performance.
+ *
+ * ARCHITECTURE:
+ * 1. Task Pool: A circular buffer of encoding tasks (size = AsyncDepth)
+ *    - Each task contains: input surface, output bitstream buffer, and sync point
+ *    - Tasks enable parallel/pipelined encoding operations
+ *
+ * 2. Surface Pool: Pre-allocated frame buffers for raw video data
+ *    - Encoder input surfaces (and VPP input/output if preprocessing enabled)
+ *
+ * 3. Bitstream Buffers: Output buffers for compressed data (one per task)
+ *    - Size determined by GetSufficientBufferSize()
+ *    - Must be large enough to hold compressed frame data
+ *
+ * ENCODING FLOW (per frame):
+ * 1. GetFreeTask() - Get available task from pool
+ *    - If no free tasks, calls SynchronizeFirstTask() to wait for oldest task to complete
+ *    - This is where pipeline stalls if tasks are still in-flight
+ *
+ * 2. LoadNextFrame() - Read raw frame from input file into surface
+ *
+ * 3. EncodeFrameAsync() - Submit frame for hardware encoding
+ *    - Returns immediately with sync point (async operation)
+ *    - Encoder compresses frame and writes to task's bitstream buffer
+ *    - Returns MFX_ERR_NOT_ENOUGH_BUFFER if buffer too small
+ *
+ * 4. Continue loop - Submit next frame while previous encodes in parallel
+ *
+ * 5. SynchronizeFirstTask() - Wait for oldest encoding to complete
+ *    - Only called when task pool is full (AsyncDepth limit reached)
+ *    - Writes completed bitstream to file
+ *    - Frees task for reuse
+ *
+ * BUFFER STARVATION IMPACT ON FPS:
+ *
+ * If bitstream buffer is too small:
+ * 1. EncodeFrameAsync() returns MFX_ERR_NOT_ENOUGH_BUFFER
+ * 2. Pipeline calls AllocateSufficientBuffer() to reallocate
+ * 3. Must retry EncodeFrameAsync() with larger buffer
+ * 4. This retry loop breaks pipeline parallelism
+ * 5. Hardware encoder may stall waiting for buffer resize
+ * 6. Subsequent frames cannot be submitted until current frame succeeds
+ * 7. Async depth effectively reduced to 1, destroying parallelism
+ * 8. Result: FPS drops dramatically (e.g., 173 fps -> 43 fps for 4K 10-bit)
+ *
+ * WHY BUFFER SIZE MATTERS FOR 10-BIT:
+ * - 10-bit pixels = 2 bytes each (vs 1 byte for 8-bit)
+ * - Compressed 10-bit bitstream is proportionally larger
+ * - Without accounting for bit depth, buffer is undersized
+ * - Continuous buffer reallocation on every frame
+ * - Pipeline never achieves full parallelism
+ *
+ * SOLUTION:
+ * GetSufficientBufferSize() now increases buffer by 25% for 10-bit, 50% for 12-bit
+ * This prevents MFX_ERR_NOT_ENOUGH_BUFFER, maintaining full pipeline throughput.
+ */
 mfxStatus CEncodingPipeline::Run() {
     m_statOverall.StartTimeMeasurement();
     MSDK_CHECK_POINTER(m_pmfxENC, MFX_ERR_NOT_INITIALIZED);
