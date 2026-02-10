@@ -1187,7 +1187,13 @@ void CSmplYUVWriter::IOThreadFunc() {
             // Immediately flush to push data to kernel buffers
             // This allows kernel to start disk I/O while we prepare next frame
             fflush(task->dstFile);
-            task->valid = false;  // Mark task as completed
+
+            // Mark buffer as completed and notify waiting threads
+            {
+                std::lock_guard<std::mutex> lock(m_ioMutex);
+                task->valid = false;  // Mark task as completed
+            }
+            m_bufferAvailableCv.notify_all();  // Wake up threads waiting for buffer
         }
     }
 }
@@ -1202,19 +1208,11 @@ mfxStatus CSmplYUVWriter::SubmitWriteTask(WriteTask* task) {
 
 // Wait for all pending I/O operations to complete
 mfxStatus CSmplYUVWriter::WaitForIOCompletion() {
-    while (true) {
-        {
-            std::lock_guard<std::mutex> lock(m_ioMutex);
-            if (m_writeQueue.empty()) {
-                // Also check if both buffers are not in use
-                bool allComplete = !m_writeBuffers[0].valid && !m_writeBuffers[1].valid;
-                if (allComplete) {
-                    break;
-                }
-            }
-        }
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
-    }
+    std::unique_lock<std::mutex> lock(m_ioMutex);
+    m_bufferAvailableCv.wait(lock, [this] {
+        // Wait until write queue is empty and both buffers are not in use
+        return m_writeQueue.empty() && !m_writeBuffers[0].valid && !m_writeBuffers[1].valid;
+    });
     return MFX_ERR_NONE;
 }
 
@@ -1414,9 +1412,12 @@ mfxStatus CSmplYUVWriter::WriteNextFrame(mfxFrameSurface1* pSurface) {
             // Use double-buffering with async I/O for maximum performance
             // Combined luma + chroma write for proper frame ordering
 
-            // Wait for current write buffer to be available
-            while (m_writeBuffers[m_currentWriteBuffer].valid) {
-                std::this_thread::sleep_for(std::chrono::microseconds(10));
+            // Wait for current write buffer to be available using condition variable
+            {
+                std::unique_lock<std::mutex> lock(m_ioMutex);
+                m_bufferAvailableCv.wait(lock, [this] {
+                    return !m_writeBuffers[m_currentWriteBuffer].valid;
+                });
             }
 
             WriteTask* task = &m_writeBuffers[m_currentWriteBuffer];
@@ -1429,8 +1430,9 @@ mfxStatus CSmplYUVWriter::WriteNextFrame(mfxFrameSurface1* pSurface) {
             mfxU32 chromaTotalSize = chromaRowSize * ChromaH;
             mfxU32 totalFrameSize = lumaTotalSize + chromaTotalSize;
 
-            // Allocate buffer for entire frame (luma + chroma)
-            task->buffer.resize(totalFrameSize);
+            // Allocate aligned buffer for entire frame (luma + chroma)
+            // Using cache-line alignment for optimal memory access performance
+            task->resizeAligned(totalFrameSize);
             mfxU8* bufPtr = task->buffer.data();
             mfxU8* chromaBufPtr = bufPtr + lumaTotalSize;
 

@@ -888,17 +888,30 @@ protected:
 
     // Double-buffering for async I/O
     struct WriteTask {
-        std::vector<mfxU8> buffer;
+        // Use aligned allocator for better cache performance (64-byte cache line alignment)
+        std::vector<mfxU8, std::allocator<mfxU8>> buffer;
         size_t size;
         FILE* dstFile;
         bool valid;
-        WriteTask() : size(0), dstFile(nullptr), valid(false) {}
+
+        WriteTask() : size(0), dstFile(nullptr), valid(false) {
+            // Reserve initial capacity with proper alignment consideration
+            buffer.reserve(32 * 1024 * 1024);  // 32MB initial capacity
+        }
+
+        // Resize buffer with alignment padding for optimal cache performance
+        void resizeAligned(size_t newSize) {
+            // Round up to cache line boundary (64 bytes) for optimal performance
+            size_t alignedSize = (newSize + 63) & ~63;
+            buffer.resize(alignedSize);
+        }
     };
     WriteTask m_writeBuffers[2];  // Ping-pong buffers
     int m_currentWriteBuffer;     // Current buffer for preparing data
     std::thread m_ioThread;       // Dedicated I/O thread
     std::mutex m_ioMutex;         // Protects write queue
     std::condition_variable m_ioCv;  // Signals I/O thread
+    std::condition_variable m_bufferAvailableCv;  // Signals when buffer becomes available
     bool m_ioThreadRunning;       // I/O thread control
     std::queue<WriteTask*> m_writeQueue;  // Queue of buffers ready to write
 
