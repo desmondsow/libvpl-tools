@@ -1052,6 +1052,18 @@ mfxStatus CSmplYUVWriter::Init(const char* strFileName, const mfxU32 numViews) {
                     "Warning: Failed to set 16MB buffer for output file, "
                     "performance may be reduced\n");
         }
+#ifdef __linux__
+        // Linux-specific: Use posix_fadvise to hint sequential write pattern
+        // and optimize page cache behavior for better throughput
+        int fd = fileno(m_fDest);
+        if (fd >= 0) {
+            // POSIX_FADV_SEQUENTIAL: Tell kernel we'll write sequentially
+            posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+            // POSIX_FADV_DONTNEED: Drop pages from cache after writing to avoid
+            // cache pollution and improve throughput for large sequential writes
+            posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+        }
+#endif
         ++m_numCreatedFiles;
     }
     else {
@@ -1072,6 +1084,18 @@ mfxStatus CSmplYUVWriter::Init(const char* strFileName, const mfxU32 numViews) {
                         "performance may be reduced\n",
                         i);
             }
+#ifdef __linux__
+            // Linux-specific: Use posix_fadvise to hint sequential write pattern
+            // and optimize page cache behavior for better throughput
+            int fd = fileno(m_fDestMVC[i]);
+            if (fd >= 0) {
+                // POSIX_FADV_SEQUENTIAL: Tell kernel we'll write sequentially
+                posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+                // POSIX_FADV_DONTNEED: Drop pages from cache after writing to avoid
+                // cache pollution and improve throughput for large sequential writes
+                posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+            }
+#endif
             ++m_numCreatedFiles;
         }
     }
@@ -1160,6 +1184,9 @@ void CSmplYUVWriter::IOThreadFunc() {
                 fprintf(stderr, "Warning: Async write incomplete (%zu/%zu bytes)\n",
                         written, task->size);
             }
+            // Immediately flush to push data to kernel buffers
+            // This allows kernel to start disk I/O while we prepare next frame
+            fflush(task->dstFile);
             task->valid = false;  // Mark task as completed
         }
     }
