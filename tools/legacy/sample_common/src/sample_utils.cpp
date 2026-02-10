@@ -1026,7 +1026,9 @@ CSmplYUVWriter::CSmplYUVWriter()
           m_bIsMultiView(false),
           m_numCreatedFiles(0),
           m_sFile(),
-          m_nViews(0){};
+          m_nViews(0),
+          m_currentWriteBuffer(0),
+          m_ioThreadRunning(false) {};
 
 mfxStatus CSmplYUVWriter::Init(const char* strFileName, const mfxU32 numViews) {
     MSDK_CHECK_POINTER(strFileName, MFX_ERR_NULL_PTR);
@@ -1042,11 +1044,12 @@ mfxStatus CSmplYUVWriter::Init(const char* strFileName, const mfxU32 numViews) {
     if (!m_bIsMultiView) {
         MSDK_FOPEN(m_fDest, m_sFile.c_str(), "wb");
         MSDK_CHECK_POINTER(m_fDest, MFX_ERR_NULL_PTR);
-        // Set large buffer to improve write performance for high-resolution video
-        if (setvbuf(m_fDest, NULL, _IOFBF, 4 * 1024 * 1024) != 0) {
+        // Set large buffer (16MB) to improve write performance for high-resolution video
+        // Larger buffer enables better kernel I/O batching and reduces syscall overhead
+        if (setvbuf(m_fDest, NULL, _IOFBF, 16 * 1024 * 1024) != 0) {
             // setvbuf failed, will use default buffering (reduced performance)
             fprintf(stderr,
-                    "Warning: Failed to set 4MB buffer for output file, "
+                    "Warning: Failed to set 16MB buffer for output file, "
                     "performance may be reduced\n");
         }
         ++m_numCreatedFiles;
@@ -1060,11 +1063,12 @@ mfxStatus CSmplYUVWriter::Init(const char* strFileName, const mfxU32 numViews) {
         for (i = 0; i < numViews; ++i) {
             MSDK_FOPEN(m_fDestMVC[i], FormMVCFileName(m_sFile.c_str(), i).c_str(), "wb");
             MSDK_CHECK_POINTER(m_fDestMVC[i], MFX_ERR_NULL_PTR);
-            // Set large buffer to improve write performance for high-resolution video
-            if (setvbuf(m_fDestMVC[i], NULL, _IOFBF, 4 * 1024 * 1024) != 0) {
+            // Set large buffer (16MB) to improve write performance for high-resolution video
+            // Larger buffer enables better kernel I/O batching and reduces syscall overhead
+            if (setvbuf(m_fDestMVC[i], NULL, _IOFBF, 16 * 1024 * 1024) != 0) {
                 // setvbuf failed, will use default buffering (reduced performance)
                 fprintf(stderr,
-                        "Warning: Failed to set 4MB buffer for output file %d, "
+                        "Warning: Failed to set 16MB buffer for output file %d, "
                         "performance may be reduced\n",
                         i);
             }
@@ -1073,6 +1077,10 @@ mfxStatus CSmplYUVWriter::Init(const char* strFileName, const mfxU32 numViews) {
     }
 
     m_bInited = true;
+
+    // Start dedicated I/O thread for async writes
+    m_ioThreadRunning = true;
+    m_ioThread = std::thread(&CSmplYUVWriter::IOThreadFunc, this);
 
     return MFX_ERR_NONE;
 }
@@ -1089,6 +1097,19 @@ CSmplYUVWriter::~CSmplYUVWriter() {
 }
 
 void CSmplYUVWriter::Close() {
+    // Stop I/O thread before closing files
+    if (m_ioThreadRunning) {
+        WaitForIOCompletion();  // Wait for pending writes
+        {
+            std::lock_guard<std::mutex> lock(m_ioMutex);
+            m_ioThreadRunning = false;
+        }
+        m_ioCv.notify_one();
+        if (m_ioThread.joinable()) {
+            m_ioThread.join();
+        }
+    }
+
     if (m_fDest) {
         fclose(m_fDest);
         m_fDest = NULL;
@@ -1108,6 +1129,66 @@ void CSmplYUVWriter::Close() {
 
     m_numCreatedFiles = 0;
     m_bInited         = false;
+}
+
+// I/O thread worker function - processes write requests asynchronously
+void CSmplYUVWriter::IOThreadFunc() {
+    while (true) {
+        WriteTask* task = nullptr;
+
+        {
+            std::unique_lock<std::mutex> lock(m_ioMutex);
+            m_ioCv.wait(lock, [this] {
+                return !m_writeQueue.empty() || !m_ioThreadRunning;
+            });
+
+            if (!m_ioThreadRunning && m_writeQueue.empty()) {
+                break;  // Exit thread
+            }
+
+            if (!m_writeQueue.empty()) {
+                task = m_writeQueue.front();
+                m_writeQueue.pop();
+            }
+        }
+
+        if (task && task->valid) {
+            // Perform actual I/O write - this is the blocking operation
+            // that now runs in a separate thread
+            size_t written = fwrite(task->buffer.data(), 1, task->size, task->dstFile);
+            if (written != task->size) {
+                fprintf(stderr, "Warning: Async write incomplete (%zu/%zu bytes)\n",
+                        written, task->size);
+            }
+            task->valid = false;  // Mark task as completed
+        }
+    }
+}
+
+// Submit a write task to the async I/O queue
+mfxStatus CSmplYUVWriter::SubmitWriteTask(WriteTask* task) {
+    std::lock_guard<std::mutex> lock(m_ioMutex);
+    m_writeQueue.push(task);
+    m_ioCv.notify_one();
+    return MFX_ERR_NONE;
+}
+
+// Wait for all pending I/O operations to complete
+mfxStatus CSmplYUVWriter::WaitForIOCompletion() {
+    while (true) {
+        {
+            std::lock_guard<std::mutex> lock(m_ioMutex);
+            if (m_writeQueue.empty()) {
+                // Also check if both buffers are not in use
+                bool allComplete = !m_writeBuffers[0].valid && !m_writeBuffers[1].valid;
+                if (allComplete) {
+                    break;
+                }
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    return MFX_ERR_NONE;
 }
 
 mfxStatus GetChromaSize(const mfxFrameInfo& pInfo, mfxU32& ChromaW, mfxU32& ChromaH) {
@@ -1303,14 +1384,31 @@ mfxStatus CSmplYUVWriter::WriteNextFrame(mfxFrameSurface1* pSurface) {
         case MFX_FOURCC_P010:
         case MFX_FOURCC_P016:
         case MFX_FOURCC_P210: {
-            // Batch write: copy all rows to buffer then write once
-            mfxU32 rowSize = (mfxU32)pInfo.CropW * 2;
-            mfxU32 totalSize = rowSize * pInfo.CropH;
-            m_writeBuffer.resize(totalSize);
-            mfxU8* bufPtr = m_writeBuffer.data();
+            // Use double-buffering with async I/O for maximum performance
+            // Combined luma + chroma write for proper frame ordering
 
-            // Optimize: if no cropping and pitch matches, do single large operation
-            if (pInfo.CropX == 0 && pInfo.CropY == 0 && pData.Pitch == rowSize) {
+            // Wait for current write buffer to be available
+            while (m_writeBuffers[m_currentWriteBuffer].valid) {
+                std::this_thread::sleep_for(std::chrono::microseconds(10));
+            }
+
+            WriteTask* task = &m_writeBuffers[m_currentWriteBuffer];
+            task->dstFile = dstFile;
+
+            // Calculate total frame size (luma + chroma)
+            mfxU32 lumaRowSize = (mfxU32)pInfo.CropW * 2;
+            mfxU32 lumaTotalSize = lumaRowSize * pInfo.CropH;
+            mfxU32 chromaRowSize = ChromaW * 2;
+            mfxU32 chromaTotalSize = chromaRowSize * ChromaH;
+            mfxU32 totalFrameSize = lumaTotalSize + chromaTotalSize;
+
+            // Allocate buffer for entire frame (luma + chroma)
+            task->buffer.resize(totalFrameSize);
+            mfxU8* bufPtr = task->buffer.data();
+            mfxU8* chromaBufPtr = bufPtr + lumaTotalSize;
+
+            // Copy luma plane
+            if (pInfo.CropX == 0 && pInfo.CropY == 0 && pData.Pitch == lumaRowSize) {
                 if (pInfo.Shift) {
                     // Convert MS-P*1* to P*1* with single-pass processing
                     mfxU16* shortPtr = (mfxU16*)pData.Y;
@@ -1322,7 +1420,7 @@ mfxStatus CSmplYUVWriter::WriteNextFrame(mfxFrameSurface1* pSurface) {
                 }
                 else {
                     // Single large memcpy for contiguous data
-                    memcpy(bufPtr, pData.Y, totalSize);
+                    memcpy(bufPtr, pData.Y, lumaTotalSize);
                 }
             }
             else {
@@ -1332,7 +1430,7 @@ mfxStatus CSmplYUVWriter::WriteNextFrame(mfxFrameSurface1* pSurface) {
                     for (i = 0; i < pInfo.CropH; i++) {
                         mfxU16* shortPtr = (mfxU16*)(pData.Y + (pInfo.CropY * pData.Pitch + pInfo.CropX) +
                                                      i * pData.Pitch);
-                        mfxU16* outPtr = (mfxU16*)(bufPtr + i * rowSize);
+                        mfxU16* outPtr = (mfxU16*)(bufPtr + i * lumaRowSize);
                         for (int idx = 0; idx < pInfo.CropW; idx++) {
                             outPtr[idx] = shortPtr[idx] >> shiftSizeLuma;
                         }
@@ -1343,13 +1441,57 @@ mfxStatus CSmplYUVWriter::WriteNextFrame(mfxFrameSurface1* pSurface) {
                     for (i = 0; i < pInfo.CropH; i++) {
                         mfxU16* shortPtr = (mfxU16*)(pData.Y + (pInfo.CropY * pData.Pitch + pInfo.CropX) +
                                                      i * pData.Pitch);
-                        memcpy(bufPtr + i * rowSize, shortPtr, rowSize);
+                        memcpy(bufPtr + i * lumaRowSize, shortPtr, lumaRowSize);
                     }
                 }
             }
-            MSDK_CHECK_NOT_EQUAL(fwrite(bufPtr, 1, totalSize, dstFile),
-                                 totalSize,
-                                 MFX_ERR_UNDEFINED_BEHAVIOR);
+
+            // Copy chroma plane (UV)
+            if (pInfo.CropX == 0 && pInfo.CropY == 0 && pData.Pitch == chromaRowSize * 2) {
+                if (pInfo.Shift) {
+                    // Convert MS-P*1* to P*1* with single-pass processing
+                    mfxU16* shortPtr = (mfxU16*)pData.UV;
+                    mfxU16* outPtr = (mfxU16*)chromaBufPtr;
+                    mfxU32 totalPixels = ChromaW * ChromaH;
+                    for (mfxU32 idx = 0; idx < totalPixels; idx++) {
+                        outPtr[idx] = shortPtr[idx] >> shiftSizeChroma;
+                    }
+                }
+                else {
+                    // Single large memcpy for contiguous data
+                    memcpy(chromaBufPtr, pData.UV, chromaTotalSize);
+                }
+            }
+            else {
+                // Row-by-row processing for cropped data
+                if (pInfo.Shift) {
+                    // Convert MS-P*1* to P*1* with batch processing
+                    for (i = 0; i < ChromaH; i++) {
+                        mfxU16* shortPtr = (mfxU16*)(pData.UV + (pInfo.CropY * pData.Pitch + pInfo.CropX * 2) +
+                                                      i * pData.Pitch);
+                        mfxU16* outPtr = (mfxU16*)(chromaBufPtr + i * chromaRowSize);
+                        for (mfxU32 idx = 0; idx < ChromaW; idx++) {
+                            outPtr[idx] = shortPtr[idx] >> shiftSizeChroma;
+                        }
+                    }
+                }
+                else {
+                    // Direct copy without shifting
+                    for (i = 0; i < ChromaH; i++) {
+                        mfxU16* shortPtr = (mfxU16*)(pData.UV + (pInfo.CropY * pData.Pitch + pInfo.CropX * 2) +
+                                                      i * pData.Pitch);
+                        memcpy(chromaBufPtr + i * chromaRowSize, shortPtr, chromaRowSize);
+                    }
+                }
+            }
+
+            // Submit entire frame (luma + chroma) to I/O thread
+            task->size = totalFrameSize;
+            task->valid = true;
+            SubmitWriteTask(task);
+
+            // Switch to next buffer for next frame
+            m_currentWriteBuffer = (m_currentWriteBuffer + 1) % 2;
 
             break;
         }
@@ -1481,53 +1623,8 @@ mfxStatus CSmplYUVWriter::WriteNextFrame(mfxFrameSurface1* pSurface) {
         case MFX_FOURCC_P010:
         case MFX_FOURCC_P016:
         case MFX_FOURCC_P210: {
-            // Batch write UV plane
-            mfxU32 rowSize = ChromaW * 2;
-            mfxU32 totalSize = rowSize * ChromaH;
-            m_writeBuffer.resize(totalSize);
-            mfxU8* bufPtr = m_writeBuffer.data();
-
-            // Optimize: if no cropping and pitch matches, do single large operation
-            if (pInfo.CropX == 0 && pInfo.CropY == 0 && pData.Pitch == rowSize * 2) {
-                if (pInfo.Shift) {
-                    // Convert MS-P*1* to P*1* with single-pass processing
-                    mfxU16* shortPtr = (mfxU16*)pData.UV;
-                    mfxU16* outPtr = (mfxU16*)bufPtr;
-                    mfxU32 totalPixels = ChromaW * ChromaH;
-                    for (mfxU32 idx = 0; idx < totalPixels; idx++) {
-                        outPtr[idx] = shortPtr[idx] >> shiftSizeChroma;
-                    }
-                }
-                else {
-                    // Single large memcpy for contiguous data
-                    memcpy(bufPtr, pData.UV, totalSize);
-                }
-            }
-            else {
-                // Row-by-row processing for cropped data
-                if (pInfo.Shift) {
-                    // Convert MS-P*1* to P*1* with batch processing
-                    for (i = 0; i < ChromaH; i++) {
-                        mfxU16* shortPtr = (mfxU16*)(pData.UV + (pInfo.CropY * pData.Pitch + pInfo.CropX * 2) +
-                                                      i * pData.Pitch);
-                        mfxU16* outPtr = (mfxU16*)(bufPtr + i * rowSize);
-                        for (mfxU32 idx = 0; idx < ChromaW; idx++) {
-                            outPtr[idx] = shortPtr[idx] >> shiftSizeChroma;
-                        }
-                    }
-                }
-                else {
-                    // Direct copy without shifting
-                    for (i = 0; i < ChromaH; i++) {
-                        mfxU16* shortPtr = (mfxU16*)(pData.UV + (pInfo.CropY * pData.Pitch + pInfo.CropX * 2) +
-                                                      i * pData.Pitch);
-                        memcpy(bufPtr + i * rowSize, shortPtr, rowSize);
-                    }
-                }
-            }
-            MSDK_CHECK_NOT_EQUAL(fwrite(bufPtr, 1, totalSize, dstFile),
-                                 (mfxU32)totalSize,
-                                 MFX_ERR_UNDEFINED_BEHAVIOR);
+            // P010 format already handled luma + chroma together in first switch
+            // Skip to avoid double-write
             break;
         }
 

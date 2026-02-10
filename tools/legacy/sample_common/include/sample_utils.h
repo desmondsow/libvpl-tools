@@ -13,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <queue>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -884,6 +885,26 @@ protected:
     std::string m_sFile;
     mfxU32 m_nViews;
     std::vector<mfxU8> m_writeBuffer;  // Frame-level write buffer for batched I/O
+
+    // Double-buffering for async I/O
+    struct WriteTask {
+        std::vector<mfxU8> buffer;
+        size_t size;
+        FILE* dstFile;
+        bool valid;
+        WriteTask() : size(0), dstFile(nullptr), valid(false) {}
+    };
+    WriteTask m_writeBuffers[2];  // Ping-pong buffers
+    int m_currentWriteBuffer;     // Current buffer for preparing data
+    std::thread m_ioThread;       // Dedicated I/O thread
+    std::mutex m_ioMutex;         // Protects write queue
+    std::condition_variable m_ioCv;  // Signals I/O thread
+    bool m_ioThreadRunning;       // I/O thread control
+    std::queue<WriteTask*> m_writeQueue;  // Queue of buffers ready to write
+
+    void IOThreadFunc();          // I/O thread worker
+    mfxStatus SubmitWriteTask(WriteTask* task);  // Submit buffer for async write
+    mfxStatus WaitForIOCompletion();  // Wait for pending writes
 };
 
 class CSmplBitstreamReader {
