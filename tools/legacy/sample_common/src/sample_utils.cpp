@@ -13,6 +13,7 @@
 #include <map>
 
 #ifdef __linux__
+#include <fcntl.h>    // For posix_fadvise() and constants
 #include <unistd.h>   // For write() syscall
 #include <errno.h>    // For errno
 #include <string.h>   // For strerror()
