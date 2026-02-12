@@ -1751,17 +1751,8 @@ mfxStatus CDecodingPipeline::SyncOutputSurface(mfxU32 wait) {
             m_fpsLimiter.Work();
             ReturnSurfaceToBuffers(m_pCurrentOutputSurface);
         }
-        else if (m_eWorkMode == MODE_FILE_DUMP) {
-            sts = DeliverOutput(&(m_pCurrentOutputSurface->surface->frame));
-            if (MFX_ERR_NONE != sts) {
-                sts = MFX_ERR_UNKNOWN;
-            }
-            else {
-                m_output_count = m_synced_count;
-            }
-            ReturnSurfaceToBuffers(m_pCurrentOutputSurface);
-        }
-        else if (m_eWorkMode == MODE_RENDERING) {
+        else if (m_eWorkMode == MODE_FILE_DUMP || m_eWorkMode == MODE_RENDERING) {
+            // Use async delivery thread to avoid blocking decode pipeline
             m_DeliveredSurfacesPool.AddSurface(m_pCurrentOutputSurface);
             m_pDeliveredEvent->Reset();
             m_pDeliverOutputSemaphore->Post();
@@ -1789,7 +1780,9 @@ mfxStatus CDecodingPipeline::RunDecoding() {
         syncopTimeout = env_syncopTimeout;
     }
 
-    if (m_eWorkMode == MODE_RENDERING) {
+    // Enable async delivery thread for both rendering and file dump modes
+    // This allows the decode pipeline to continue while frames are being written
+    if (m_eWorkMode == MODE_RENDERING || m_eWorkMode == MODE_FILE_DUMP) {
         m_pDeliverOutputSemaphore = new MSDKSemaphore(sts);
         m_pDeliveredEvent         = new MSDKEvent(sts, false, false);
 
@@ -1862,10 +1855,11 @@ mfxStatus CDecodingPipeline::RunDecoding() {
                 // we stuck with no free surface available, now we will sync...
                 sts = SyncOutputSurface(syncopTimeout);
                 if (MFX_ERR_MORE_DATA == sts) {
-                    if ((m_eWorkMode == MODE_PERFORMANCE) || (m_eWorkMode == MODE_FILE_DUMP)) {
+                    if (m_eWorkMode == MODE_PERFORMANCE) {
                         sts = MFX_ERR_NOT_FOUND;
                     }
-                    else if (m_eWorkMode == MODE_RENDERING) {
+                    else if (m_eWorkMode == MODE_FILE_DUMP || m_eWorkMode == MODE_RENDERING) {
+                        // Wait for delivery thread to process frames
                         if (m_synced_count != m_output_count) {
                             sts = m_pDeliveredEvent->TimedWait(syncopTimeout);
                         }
@@ -2143,7 +2137,8 @@ mfxStatus CDecodingPipeline::RunDecoding() {
                 1000);
     }
 
-    if (m_eWorkMode == MODE_RENDERING) {
+    // Wait for async delivery thread to complete (both file dump and rendering modes)
+    if (m_eWorkMode == MODE_FILE_DUMP || m_eWorkMode == MODE_RENDERING) {
         m_bStopDeliverLoop = true;
 
         m_pDeliverOutputSemaphore->Post();
