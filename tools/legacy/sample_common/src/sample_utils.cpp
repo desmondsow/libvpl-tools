@@ -1024,6 +1024,7 @@ CSmplYUVWriter::CSmplYUVWriter()
           m_fDestMVC(NULL),
           m_bInited(false),
           m_bIsMultiView(false),
+          m_bIsNullOutput(false),
           m_numCreatedFiles(0),
           m_sFile(),
           m_nViews(0){};
@@ -1034,6 +1035,13 @@ mfxStatus CSmplYUVWriter::Init(const char* strFileName, const mfxU32 numViews) {
 
     m_sFile  = std::string(strFileName);
     m_nViews = numViews;
+
+    // Detect null output devices for optimization
+    m_bIsNullOutput = (strcmp(strFileName, "/dev/null") == 0 ||
+#ifdef _WIN32
+                       _stricmp(strFileName, "NUL") == 0 ||
+#endif
+                       false);
 
     Close();
 
@@ -1108,6 +1116,7 @@ void CSmplYUVWriter::Close() {
 
     m_numCreatedFiles = 0;
     m_bInited         = false;
+    m_bIsNullOutput   = false;
 }
 
 mfxStatus GetChromaSize(const mfxFrameInfo& pInfo, mfxU32& ChromaW, mfxU32& ChromaH) {
@@ -1177,6 +1186,11 @@ mfxStatus GetChromaSize(const mfxFrameInfo& pInfo, mfxU32& ChromaW, mfxU32& Chro
 mfxStatus CSmplYUVWriter::WriteNextFrame(mfxFrameSurface1* pSurface) {
     MSDK_CHECK_ERROR(m_bInited, false, MFX_ERR_NOT_INITIALIZED);
     MSDK_CHECK_POINTER(pSurface, MFX_ERR_NULL_PTR);
+
+    // Fast path: skip all processing if writing to null device
+    if (m_bIsNullOutput) {
+        return MFX_ERR_NONE;
+    }
 
     mfxFrameInfo& pInfo = pSurface->Info;
     mfxFrameData& pData = pSurface->Data;
@@ -1309,7 +1323,7 @@ mfxStatus CSmplYUVWriter::WriteNextFrame(mfxFrameSurface1* pSurface) {
             for (i = 0; i < ChromaH; i++) {
                 MSDK_CHECK_NOT_EQUAL(
                     fwrite(pData.V + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX / 2) +
-                               i * pData.Pitch,
+                               i * pData.Pitch / 2,
                            1,
                            ChromaW,
                            dstFile),
@@ -1452,6 +1466,11 @@ mfxStatus CSmplYUVWriter::WriteNextFrame(mfxFrameSurface1* pSurface) {
 mfxStatus CSmplYUVWriter::WriteNextFrameI420(mfxFrameSurface1* pSurface) {
     MSDK_CHECK_ERROR(m_bInited, false, MFX_ERR_NOT_INITIALIZED);
     MSDK_CHECK_POINTER(pSurface, MFX_ERR_NULL_PTR);
+
+    // Fast path: skip all processing if writing to null device
+    if (m_bIsNullOutput) {
+        return MFX_ERR_NONE;
+    }
 
     mfxFrameInfo& pInfo = pSurface->Info;
     mfxFrameData& pData = pSurface->Data;
